@@ -236,6 +236,9 @@
         <setting id="scan_interval_hours" type="integer" label="32022" help="32122">
           <level>1</level>
           <default>24</default>
+          <dependencies>
+            <dependency type="enable" operator="is" setting="auto_scan">true</dependency>
+          </dependencies>
           <constraints>
             <minimum>1</minimum>
             <maximum>720</maximum>
@@ -245,6 +248,9 @@
         <setting id="startup_delay_seconds" type="integer" label="32023" help="32123">
           <level>1</level>
           <default>60</default>
+          <dependencies>
+            <dependency type="enable" operator="is" setting="auto_scan">true</dependency>
+          </dependencies>
           <constraints>
             <minimum>0</minimum>
             <maximum>3600</maximum>
