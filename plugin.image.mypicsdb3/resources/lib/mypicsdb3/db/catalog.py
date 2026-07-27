@@ -5,13 +5,36 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from ..models import Source
-from ..utils import normalize_uri, sha256_text, utc_now
+from ..query_model import (
+    canonical_picture_query_json,
+    compile_picture_query,
+    parse_picture_query,
+    picture_query_to_dict,
+)
+from ..rating_policy import RATING_POLICY_ALL, normalize_rating_policy, rating_sql_predicate
+from ..saved_searches import (
+    SavedSearch,
+    SavedSearchValidationError,
+    normalize_saved_search_name,
+    parse_stored_saved_search,
+)
+from ..search_index import build_picture_search_document
+from ..utils import (
+    NON_INDEXABLE_PICTURE_SOURCE_URIS,
+    is_indexable_picture_source_uri,
+    normalize_uri,
+    sha256_text,
+    utc_now,
+)
 from .engine import DatabaseEngine
-from .schema import initialise_schema
+from .locks import acquire_lock as acquire_catalog_lock
+from .locks import refresh_lock as refresh_catalog_lock
+from .locks import release_lock as release_catalog_lock
+from .migrations import MigrationRunner
 
 
 PICTURE_COLUMNS = """
-p.id, p.source_id, p.folder_id, p.uri, p.filename, p.extension, p.file_size,
+p.id, p.source_id, p.folder_id, p.uri, p.filename, p.extension, p.media_type, p.file_size,
 p.file_mtime, p.discovered_at, p.last_seen_at, p.taken_at, p.taken_source,
 p.taken_year, p.taken_month, p.taken_day, p.width, p.height, p.orientation,
 p.mime_type, p.camera_make, p.camera_model, p.rating, p.gps_latitude,
@@ -22,23 +45,165 @@ s.label AS source_label
 
 
 class Catalog:
-    def __init__(self, engine: DatabaseEngine, logger=None):
+    def __init__(self, engine: DatabaseEngine, logger=None, rating_policy: str = RATING_POLICY_ALL):
         self.engine = engine
         self.logger = logger
+        self.rating_policy = normalize_rating_policy(rating_policy)
 
-    def initialize(self) -> None:
-        with self.engine.transaction() as connection:
-            initialise_schema(self.engine, connection)
+    def set_rating_policy(self, rating_policy: str) -> None:
+        self.rating_policy = normalize_rating_policy(rating_policy)
+
+    def _rating_predicate(
+        self,
+        column: str = "p.rating",
+        media_type_column: Optional[str] = None,
+    ) -> Tuple[str, Sequence[Any]]:
+        predicate, params = rating_sql_predicate(self.rating_policy, column)
+        if predicate and media_type_column:
+            predicate = "(%s='video' OR %s)" % (media_type_column, predicate)
+        return predicate, params
+
+    def _apply_rating_policy(
+        self,
+        where: str,
+        params: Sequence[Any],
+        column: str = "p.rating",
+    ) -> Tuple[str, Tuple[Any, ...]]:
+        predicate, policy_params = self._rating_predicate(column, "p.media_type")
+        if predicate:
+            where = "(%s) AND %s" % (where, predicate) if where else predicate
+        return where, (*params, *policy_params)
+
+    def initialize(self):
+        return MigrationRunner(self.engine, logger=self.logger).initialize()
 
     def test_connection(self) -> None:
         self.engine.test_connection()
+
+    def list_saved_searches(self) -> List[Dict[str, Any]]:
+        order = "name COLLATE NOCASE, id" if self.engine.backend == "sqlite" else "name, id"
+        with self.engine.transaction() as connection:
+            return self.engine.fetchall(
+                connection,
+                "SELECT id, name, query_version, created_at, updated_at "
+                "FROM saved_searches ORDER BY %s" % order,
+            )
+
+    def get_saved_search(self, saved_search_id: int) -> Optional[SavedSearch]:
+        with self.engine.transaction() as connection:
+            row = self.engine.fetchone(
+                connection,
+                "SELECT id, name, query_version, query_json, created_at, updated_at "
+                "FROM saved_searches WHERE id=?",
+                (saved_search_id,),
+            )
+        return parse_stored_saved_search(row) if row is not None else None
+
+    def get_saved_search_summary(self, saved_search_id: int) -> Optional[Dict[str, Any]]:
+        with self.engine.transaction() as connection:
+            return self.engine.fetchone(
+                connection,
+                "SELECT id, name, query_version, created_at, updated_at "
+                "FROM saved_searches WHERE id=?",
+                (saved_search_id,),
+            )
+
+    def create_saved_search(self, name: str, query_model: Any) -> int:
+        normalized_name = normalize_saved_search_name(name)
+        query = parse_picture_query(picture_query_to_dict(query_model))
+        query_json = canonical_picture_query_json(query)
+        now = utc_now()
+        with self.engine.transaction(immediate=True) as connection:
+            existing = self.engine.fetchone(
+                connection,
+                "SELECT id FROM saved_searches WHERE name=?",
+                (normalized_name,),
+            )
+            if existing is not None:
+                raise SavedSearchValidationError(
+                    "A saved search with this name already exists"
+                )
+            try:
+                cursor = self.engine.execute(
+                    connection,
+                    "INSERT INTO saved_searches "
+                    "(name, query_version, query_json, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (normalized_name, query.version, query_json, now, now),
+                )
+            except self.engine.integrity_errors as exc:
+                raise SavedSearchValidationError(
+                    "A saved search with this name already exists"
+                ) from exc
+            try:
+                return int(cursor.lastrowid)
+            finally:
+                cursor.close()
+
+    def rename_saved_search(self, saved_search_id: int, name: str) -> bool:
+        normalized_name = normalize_saved_search_name(name)
+        with self.engine.transaction(immediate=True) as connection:
+            existing = self.engine.fetchone(
+                connection,
+                "SELECT id FROM saved_searches WHERE name=? AND id<>?",
+                (normalized_name, saved_search_id),
+            )
+            if existing is not None:
+                raise SavedSearchValidationError(
+                    "A saved search with this name already exists"
+                )
+            try:
+                cursor = self.engine.execute(
+                    connection,
+                    "UPDATE saved_searches SET name=?, updated_at=? WHERE id=?",
+                    (normalized_name, utc_now(), saved_search_id),
+                )
+            except self.engine.integrity_errors as exc:
+                raise SavedSearchValidationError(
+                    "A saved search with this name already exists"
+                ) from exc
+            try:
+                return int(cursor.rowcount or 0) > 0
+            finally:
+                cursor.close()
+
+    def delete_saved_search(self, saved_search_id: int) -> bool:
+        with self.engine.transaction(immediate=True) as connection:
+            cursor = self.engine.execute(
+                connection,
+                "DELETE FROM saved_searches WHERE id=?",
+                (saved_search_id,),
+            )
+            try:
+                return int(cursor.rowcount or 0) > 0
+            finally:
+                cursor.close()
 
     def sync_sources(self, kodi_sources: Sequence[Dict[str, str]]) -> List[Source]:
         now = utc_now()
         hashes = []
         with self.engine.transaction() as connection:
+            ignored_hashes = tuple(sha256_text(uri) for uri in NON_INDEXABLE_PICTURE_SOURCE_URIS)
+            if ignored_hashes:
+                placeholders = ",".join("?" for _ in ignored_hashes)
+                cursor = self.engine.execute(
+                    connection,
+                    "DELETE FROM sources WHERE uri_hash IN (%s)" % placeholders,
+                    ignored_hashes,
+                )
+                try:
+                    removed_ignored_sources = int(cursor.rowcount or 0) > 0
+                finally:
+                    cursor.close()
+                if removed_ignored_sources:
+                    self.engine.execute(
+                        connection,
+                        "DELETE FROM tags WHERE NOT EXISTS (SELECT 1 FROM picture_tags WHERE picture_tags.tag_id=tags.id)",
+                    ).close()
             for source in kodi_sources:
                 uri = normalize_uri(source["uri"], directory=True)
+                if not is_indexable_picture_source_uri(uri):
+                    continue
                 uri_hash = sha256_text(uri)
                 hashes.append(uri_hash)
                 existing = self.engine.fetchone(connection, "SELECT id FROM sources WHERE uri_hash=?", (uri_hash,))
@@ -87,6 +252,26 @@ class Catalog:
         with self.engine.transaction() as connection:
             self.engine.execute(connection, "UPDATE sources SET enabled=?, updated_at=? WHERE id=?", (1 if enabled else 0, utc_now(), source_id)).close()
 
+    def delete_source(self, source_id: int) -> bool:
+        """Delete a source and the catalogue rows that belong to it.
+
+        Folder and picture rows are removed by the database's foreign-key
+        cascades. Orphaned tags are then cleaned up explicitly because tags can
+        be shared by pictures from several sources.
+        """
+        with self.engine.transaction() as connection:
+            cursor = self.engine.execute(connection, "DELETE FROM sources WHERE id=?", (source_id,))
+            try:
+                deleted = int(cursor.rowcount or 0) > 0
+            finally:
+                cursor.close()
+            if deleted:
+                self.engine.execute(
+                    connection,
+                    "DELETE FROM tags WHERE NOT EXISTS (SELECT 1 FROM picture_tags WHERE picture_tags.tag_id=tags.id)",
+                ).close()
+        return deleted
+
     def set_source_scan_state(self, source_id: int, available: bool, status: str, error: Optional[str] = None) -> None:
         with self.engine.transaction() as connection:
             self.engine.execute(
@@ -95,21 +280,20 @@ class Catalog:
                 (1 if available else 0, utc_now(), status, error, utc_now(), source_id),
             ).close()
 
-    def acquire_lock(self, name: str, owner: str, ttl_seconds: int = 21600) -> bool:
-        now_dt = datetime.now(timezone.utc)
-        now = now_dt.strftime("%Y-%m-%d %H:%M:%S")
-        expires = (now_dt + timedelta(seconds=ttl_seconds)).strftime("%Y-%m-%d %H:%M:%S")
-        try:
-            with self.engine.transaction(immediate=True) as connection:
-                self.engine.execute(connection, "DELETE FROM locks WHERE expires_at<=?", (now,)).close()
-                self.engine.execute(connection, "INSERT INTO locks (name, owner, acquired_at, expires_at) VALUES (?, ?, ?, ?)", (name, owner, now, expires)).close()
-            return True
-        except self.engine.integrity_errors:
-            return False
+    def acquire_lock(self, name: str, owner: str, ttl_seconds: int = 1800) -> bool:
+        return acquire_catalog_lock(self.engine, name, owner, ttl_seconds)
+
+    def refresh_lock(self, name: str, owner: str, ttl_seconds: int = 1800, connection=None) -> bool:
+        return refresh_catalog_lock(
+            self.engine,
+            name,
+            owner,
+            ttl_seconds,
+            connection=connection,
+        )
 
     def release_lock(self, name: str, owner: str) -> None:
-        with self.engine.transaction() as connection:
-            self.engine.execute(connection, "DELETE FROM locks WHERE name=? AND owner=?", (name, owner)).close()
+        release_catalog_lock(self.engine, name, owner)
 
     def begin_scan_run(self, source_id: Optional[int]) -> int:
         with self.engine.transaction() as connection:
@@ -133,12 +317,19 @@ class Catalog:
 
     def overview(self) -> Dict[str, Any]:
         with self.engine.transaction() as connection:
-            pictures = self.engine.fetchone(connection, "SELECT COUNT(*) AS total, SUM(CASE WHEN is_missing=1 THEN 1 ELSE 0 END) AS missing FROM pictures") or {}
+            pictures = self.engine.fetchone(
+                connection,
+                "SELECT COUNT(*) AS total, "
+                "SUM(CASE WHEN is_missing=1 THEN 1 ELSE 0 END) AS missing, "
+                "SUM(CASE WHEN media_type='video' AND is_missing=0 THEN 1 ELSE 0 END) AS videos "
+                "FROM pictures",
+            ) or {}
             folders = self.engine.fetchone(connection, "SELECT COUNT(*) AS total FROM folders WHERE is_missing=0") or {}
             sources = self.engine.fetchone(connection, "SELECT COUNT(*) AS total, SUM(CASE WHEN enabled=1 THEN 1 ELSE 0 END) AS enabled FROM sources") or {}
         return {
             "pictures": int(pictures.get("total") or 0),
             "missing": int(pictures.get("missing") or 0),
+            "videos": int(pictures.get("videos") or 0),
             "folders": int(folders.get("total") or 0),
             "sources": int(sources.get("total") or 0),
             "enabled_sources": int(sources.get("enabled") or 0),
@@ -167,7 +358,7 @@ class Catalog:
             cursor.close()
 
     def find_picture(self, connection, uri: str) -> Optional[Dict[str, Any]]:
-        return self.engine.fetchone(connection, "SELECT id, file_size, file_mtime, metadata_hash, favorite, discovered_at FROM pictures WHERE uri_hash=?", (sha256_text(uri),))
+        return self.engine.fetchone(connection, "SELECT id, file_size, file_mtime, media_type, metadata_hash, favorite, discovered_at FROM pictures WHERE uri_hash=?", (sha256_text(uri),))
 
     def touch_picture(self, connection, picture_id: int, folder_id: int, source_id: int, seen_at: str) -> None:
         self.engine.execute(connection, "UPDATE pictures SET folder_id=?, source_id=?, last_seen_at=?, is_missing=0, missing_since=NULL WHERE id=?", (folder_id, source_id, seen_at, picture_id)).close()
@@ -182,10 +373,11 @@ class Catalog:
             return None, None, None
 
     def insert_picture(self, connection, record: Dict[str, Any], keywords: Iterable[str]) -> int:
+        keyword_values = tuple(keywords)
         year, month, day = self._date_parts(record.get("taken_at"))
         fields = (
             record["source_id"], record["folder_id"], record["uri"], sha256_text(record["uri"]), record["filename"],
-            record["extension"], record["file_size"], record["file_mtime"], record["discovered_at"], record["last_seen_at"],
+            record["extension"], record.get("media_type", "picture"), record["file_size"], record["file_mtime"], record["discovered_at"], record["last_seen_at"],
             record.get("taken_at"), record.get("taken_source"), year, month, day, record.get("width"), record.get("height"),
             record.get("orientation"), record.get("mime_type"), record.get("camera_make"), record.get("camera_model"),
             record.get("rating"), record.get("gps_latitude"), record.get("gps_longitude"), record.get("city"), record.get("state"),
@@ -193,36 +385,58 @@ class Catalog:
             random.random(),
         )
         cursor = self.engine.execute(connection, """INSERT INTO pictures (
-            source_id, folder_id, uri, uri_hash, filename, extension, file_size, file_mtime,
+            source_id, folder_id, uri, uri_hash, filename, extension, media_type, file_size, file_mtime,
             discovered_at, last_seen_at, taken_at, taken_source, taken_year, taken_month, taken_day,
             width, height, orientation, mime_type, camera_make, camera_model, rating,
             gps_latitude, gps_longitude, city, state, country, sublocation, caption,
             metadata_hash, thumb_uri, random_key, favorite, is_missing
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0)""", fields)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0)""", fields)
         try:
             picture_id = int(cursor.lastrowid)
         finally:
             cursor.close()
-        self.replace_tags(connection, picture_id, keywords)
+        self.replace_tags(connection, picture_id, keyword_values)
+        self.replace_search_document(connection, picture_id, record, keyword_values)
         return picture_id
 
     def update_picture(self, connection, picture_id: int, record: Dict[str, Any], keywords: Iterable[str]) -> None:
+        keyword_values = tuple(keywords)
         year, month, day = self._date_parts(record.get("taken_at"))
         self.engine.execute(connection, """UPDATE pictures SET
-            source_id=?, folder_id=?, uri=?, filename=?, extension=?, file_size=?, file_mtime=?, last_seen_at=?,
+            source_id=?, folder_id=?, uri=?, filename=?, extension=?, media_type=?, file_size=?, file_mtime=?, last_seen_at=?,
             taken_at=?, taken_source=?, taken_year=?, taken_month=?, taken_day=?, width=?, height=?, orientation=?,
             mime_type=?, camera_make=?, camera_model=?, rating=?, gps_latitude=?, gps_longitude=?, city=?, state=?,
             country=?, sublocation=?, caption=?, metadata_hash=?, thumb_uri=?, is_missing=0, missing_since=NULL
             WHERE id=?""", (
                 record["source_id"], record["folder_id"], record["uri"], record["filename"], record["extension"],
-                record["file_size"], record["file_mtime"], record["last_seen_at"], record.get("taken_at"),
+                record.get("media_type", "picture"), record["file_size"], record["file_mtime"], record["last_seen_at"], record.get("taken_at"),
                 record.get("taken_source"), year, month, day, record.get("width"), record.get("height"),
                 record.get("orientation"), record.get("mime_type"), record.get("camera_make"), record.get("camera_model"),
                 record.get("rating"), record.get("gps_latitude"), record.get("gps_longitude"), record.get("city"),
                 record.get("state"), record.get("country"), record.get("sublocation"), record.get("caption"),
                 record.get("metadata_hash"), record.get("thumb_uri"), picture_id,
             )).close()
-        self.replace_tags(connection, picture_id, keywords)
+        self.replace_tags(connection, picture_id, keyword_values)
+        self.replace_search_document(connection, picture_id, record, keyword_values)
+
+    def replace_search_document(
+        self,
+        connection,
+        picture_id: int,
+        record: Dict[str, Any],
+        keywords: Iterable[str],
+    ) -> None:
+        document = build_picture_search_document(record, keywords)
+        self.engine.execute(
+            connection,
+            "DELETE FROM picture_search_documents WHERE picture_id=?",
+            (picture_id,),
+        ).close()
+        self.engine.execute(
+            connection,
+            "INSERT INTO picture_search_documents (picture_id, document) VALUES (?, ?)",
+            (picture_id, document),
+        ).close()
 
     def replace_tags(self, connection, picture_id: int, keywords: Iterable[str]) -> None:
         self.engine.execute(connection, "DELETE FROM picture_tags WHERE picture_id=?", (picture_id,)).close()
@@ -260,21 +474,76 @@ class Catalog:
     def update_folder_summaries(self, connection, source_id: int) -> None:
         folders = self.engine.fetchall(connection, "SELECT id FROM folders WHERE source_id=? AND is_missing=0", (source_id,))
         for folder in folders:
-            recent = self.engine.fetchone(connection, "SELECT id, taken_at, discovered_at FROM pictures WHERE folder_id=? AND is_missing=0 ORDER BY COALESCE(taken_at, discovered_at) DESC, id DESC LIMIT 1", (folder["id"],))
-            if recent:
-                self.engine.execute(connection, "UPDATE folders SET representative_picture_id=?, latest_taken_at=?, latest_discovered_at=? WHERE id=?", (recent["id"], recent.get("taken_at"), recent.get("discovered_at"), folder["id"])).close()
+            latest = self.engine.fetchone(
+                connection,
+                "SELECT id, taken_at, discovered_at FROM pictures "
+                "WHERE folder_id=? AND is_missing=0 "
+                "ORDER BY COALESCE(taken_at, discovered_at) DESC, id DESC LIMIT 1",
+                (folder["id"],),
+            )
+            if latest:
+                representative = self.engine.fetchone(
+                    connection,
+                    "SELECT id FROM pictures WHERE folder_id=? AND is_missing=0 "
+                    "ORDER BY CASE WHEN media_type='picture' THEN 0 ELSE 1 END, "
+                    "COALESCE(taken_at, discovered_at) DESC, id DESC LIMIT 1",
+                    (folder["id"],),
+                )
+                representative_id = representative["id"] if representative else latest["id"]
+                self.engine.execute(
+                    connection,
+                    "UPDATE folders SET representative_picture_id=?, latest_taken_at=?, latest_discovered_at=? WHERE id=?",
+                    (representative_id, latest.get("taken_at"), latest.get("discovered_at"), folder["id"]),
+                ).close()
             else:
                 self.engine.execute(connection, "UPDATE folders SET representative_picture_id=NULL, latest_taken_at=NULL, latest_discovered_at=NULL WHERE id=?", (folder["id"],)).close()
 
     # Browser and widget queries --------------------------------------------
 
     def _pictures(self, where: str, params: Sequence[Any], order: str, limit: int, offset: int = 0) -> List[Dict[str, Any]]:
+        where, params = self._apply_rating_policy(where, params)
         query = "SELECT %s FROM pictures p JOIN folders f ON f.id=p.folder_id JOIN sources s ON s.id=p.source_id WHERE p.is_missing=0" % PICTURE_COLUMNS
         if where:
             query += " AND " + where
         query += " ORDER BY " + order + " LIMIT ? OFFSET ?"
         with self.engine.transaction() as connection:
             return self.engine.fetchall(connection, query, (*params, limit, offset))
+
+    def query_pictures(self, query_model: Any, limit: int, offset: int = 0) -> List[Dict[str, Any]]:
+        """Run a validated versioned query model without exposing raw SQL."""
+        if type(limit) is not int:
+            raise ValueError("Query-model page limit must be an integer")
+        if type(offset) is not int:
+            raise ValueError("Query-model page offset must be an integer")
+        if limit < 1 or limit > 1000:
+            raise ValueError("Query-model page limit must be between 1 and 1000")
+        if offset < 0:
+            raise ValueError("Query-model page offset must not be negative")
+        compiled = compile_picture_query(query_model, self.rating_policy)
+        sql = (
+            "SELECT %s FROM pictures p "
+            "JOIN folders f ON f.id=p.folder_id "
+            "JOIN sources s ON s.id=p.source_id "
+            "WHERE %s ORDER BY %s LIMIT ? OFFSET ?"
+            % (PICTURE_COLUMNS, compiled.where_sql, compiled.order_by_sql)
+        )
+        with self.engine.transaction() as connection:
+            return self.engine.fetchall(
+                connection,
+                sql,
+                (*compiled.params, limit, offset),
+            )
+
+    def count_query_pictures(self, query_model: Any) -> int:
+        """Count the same result set used by :meth:`query_pictures`."""
+        compiled = compile_picture_query(query_model, self.rating_policy)
+        with self.engine.transaction() as connection:
+            row = self.engine.fetchone(
+                connection,
+                "SELECT COUNT(*) AS total FROM pictures p WHERE %s" % compiled.where_sql,
+                compiled.params,
+            )
+        return int((row or {}).get("total") or 0)
 
     def recent_taken(self, limit: int, offset: int = 0) -> List[Dict[str, Any]]:
         return self._pictures("p.taken_at IS NOT NULL", (), "p.taken_at DESC, p.id DESC", limit, offset)
@@ -291,11 +560,73 @@ class Catalog:
     def geotagged(self, limit: int, offset: int = 0) -> List[Dict[str, Any]]:
         return self._pictures("p.gps_latitude IS NOT NULL AND p.gps_longitude IS NOT NULL", (), "COALESCE(p.taken_at, p.discovered_at) DESC", limit, offset)
 
+    def videos(self, limit: int, offset: int = 0) -> List[Dict[str, Any]]:
+        return self._pictures("p.media_type='video'", (), "COALESCE(p.taken_at, p.discovered_at) DESC, p.id DESC", limit, offset)
+
     def on_this_day(self, month: int, day: int, current_year: int, limit: int, offset: int = 0) -> List[Dict[str, Any]]:
         return self._pictures("p.taken_month=? AND p.taken_day=? AND p.taken_year<?", (month, day, current_year), "p.taken_year DESC, p.taken_at DESC", limit, offset)
 
+    def random_on_this_day(self, month: int, day: int, current_year: int, limit: int) -> List[Dict[str, Any]]:
+        seed = random.random()
+        where = "p.taken_month=? AND p.taken_day=? AND p.taken_year<?"
+        first = self._pictures(
+            where + " AND p.random_key>=?",
+            (month, day, current_year, seed),
+            "p.random_key",
+            limit,
+            0,
+        )
+        if len(first) < limit:
+            second = self._pictures(
+                where + " AND p.random_key<?",
+                (month, day, current_year, seed),
+                "p.random_key",
+                limit - len(first),
+                0,
+            )
+            first.extend(second)
+        random.shuffle(first)
+        return first
+
+    def media_type_for_uri(self, uri: str) -> Optional[str]:
+        normalized = normalize_uri(uri)
+        if not normalized:
+            return None
+        with self.engine.transaction() as connection:
+            row = self.engine.fetchone(
+                connection,
+                "SELECT media_type FROM pictures WHERE uri_hash=? AND is_missing=0",
+                (sha256_text(normalized),),
+            )
+        return str(row["media_type"]) if row and row.get("media_type") else None
+
     def pictures_for_year(self, year: int, limit: int, offset: int = 0) -> List[Dict[str, Any]]:
-        return self._pictures("p.taken_year=?", (year,), "p.taken_at DESC", limit, offset)
+        return self._pictures("p.taken_year=?", (year,), "p.taken_at DESC, p.id DESC", limit, offset)
+
+    def pictures_for_day(
+        self,
+        year: int,
+        month: int,
+        day: int,
+        limit: int,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        return self._pictures(
+            "p.taken_year=? AND p.taken_month=? AND p.taken_day=?",
+            (year, month, day),
+            "p.taken_at DESC, p.id DESC",
+            limit,
+            offset,
+        )
+
+    def pictures_without_date(self, limit: int, offset: int = 0) -> List[Dict[str, Any]]:
+        return self._pictures(
+            "p.taken_at IS NULL",
+            (),
+            "p.discovered_at DESC, p.id DESC",
+            limit,
+            offset,
+        )
 
     def pictures_for_camera(self, camera_make: str, camera_model: str, limit: int, offset: int = 0) -> List[Dict[str, Any]]:
         return self._pictures("COALESCE(p.camera_make,'')=? AND COALESCE(p.camera_model,'')=?", (camera_make, camera_model), "COALESCE(p.taken_at, p.discovered_at) DESC", limit, offset)
@@ -307,6 +638,23 @@ class Catalog:
     def pictures_in_folder(self, folder_id: int, limit: int, offset: int = 0) -> List[Dict[str, Any]]:
         return self._pictures("p.folder_id=?", (folder_id,), "COALESCE(p.taken_at, p.discovered_at) DESC, p.filename", limit, offset)
 
+    @staticmethod
+    def _escape_like(value: str) -> str:
+        return value.replace("!", "!!").replace("%", "!%").replace("_", "!_")
+
+    def media_in_folder_tree(self, folder_id: int, limit: int) -> List[Dict[str, Any]]:
+        folder = self.get_folder(folder_id)
+        if not folder:
+            return []
+        prefix = self._escape_like(str(folder["uri"])) + "%"
+        return self._pictures(
+            "p.source_id=? AND p.uri LIKE ? ESCAPE '!'",
+            (int(folder["source_id"]), prefix),
+            "COALESCE(p.taken_at, p.discovered_at) DESC, p.filename",
+            limit,
+            0,
+        )
+
     def random_pictures(self, limit: int) -> List[Dict[str, Any]]:
         seed = random.random()
         first = self._pictures("p.random_key>=?", (seed,), "p.random_key", limit, 0)
@@ -316,27 +664,40 @@ class Catalog:
         return first
 
     def _folder_rows(self, where: str, params: Sequence[Any], order: str, limit: int, offset: int = 0) -> List[Dict[str, Any]]:
+        count_predicate, count_params = self._rating_predicate("pc.rating", "pc.media_type")
+        representative_predicate, representative_params = self._rating_predicate("pr.rating", "pr.media_type")
+        count_filter = " AND " + count_predicate if count_predicate else ""
+        representative_filter = " AND " + representative_predicate if representative_predicate else ""
         query = """SELECT f.*, p.uri AS representative_uri, p.thumb_uri AS representative_thumb,
-                   (SELECT COUNT(*) FROM pictures pc WHERE pc.folder_id=f.id AND pc.is_missing=0) AS picture_count,
+                   (SELECT COUNT(*) FROM pictures pc WHERE pc.folder_id=f.id AND pc.is_missing=0%s) AS picture_count,
                    s.label AS source_label
                    FROM folders f
                    JOIN sources s ON s.id=f.source_id
-                   LEFT JOIN pictures p ON p.id=f.representative_picture_id
-                   WHERE f.is_missing=0"""
+                   LEFT JOIN pictures p ON p.id=(
+                       SELECT pr.id FROM pictures pr
+                       WHERE pr.folder_id=f.id AND pr.is_missing=0%s
+                       ORDER BY CASE WHEN pr.media_type='picture' THEN 0 ELSE 1 END,
+                                COALESCE(pr.taken_at, pr.discovered_at) DESC, pr.id DESC LIMIT 1
+                   )
+                   WHERE f.is_missing=0""" % (count_filter, representative_filter)
         if where:
             query += " AND " + where
         query += " ORDER BY " + order + " LIMIT ? OFFSET ?"
         with self.engine.transaction() as connection:
-            return self.engine.fetchall(connection, query, (*params, limit, offset))
+            return self.engine.fetchall(
+                connection,
+                query,
+                (*count_params, *representative_params, *params, limit, offset),
+            )
 
     def recent_folders(self, limit: int, offset: int = 0) -> List[Dict[str, Any]]:
-        return self._folder_rows("f.representative_picture_id IS NOT NULL", (), "f.latest_discovered_at DESC, f.id DESC", limit, offset)
+        return self._folder_rows("p.id IS NOT NULL", (), "f.latest_discovered_at DESC, f.id DESC", limit, offset)
 
     def random_folders(self, limit: int) -> List[Dict[str, Any]]:
         seed = random.random()
-        first = self._folder_rows("f.representative_picture_id IS NOT NULL AND f.random_key>=?", (seed,), "f.random_key", limit)
+        first = self._folder_rows("p.id IS NOT NULL AND f.random_key>=?", (seed,), "f.random_key", limit)
         if len(first) < limit:
-            first.extend(self._folder_rows("f.representative_picture_id IS NOT NULL AND f.random_key<?", (seed,), "f.random_key", limit - len(first)))
+            first.extend(self._folder_rows("p.id IS NOT NULL AND f.random_key<?", (seed,), "f.random_key", limit - len(first)))
         return first
 
     def source_root_folders(self, source_id: int) -> List[Dict[str, Any]]:
@@ -350,31 +711,129 @@ class Catalog:
             return self.engine.fetchone(connection, "SELECT f.*, s.label AS source_label FROM folders f JOIN sources s ON s.id=f.source_id WHERE f.id=?", (folder_id,))
 
     def years(self) -> List[Dict[str, Any]]:
+        predicate, policy_params = self._rating_predicate("rating", "media_type")
+        policy_sql = " AND " + predicate if predicate else ""
         with self.engine.transaction() as connection:
-            groups = self.engine.fetchall(connection, "SELECT taken_year AS year, COUNT(*) AS picture_count FROM pictures WHERE is_missing=0 AND taken_year IS NOT NULL GROUP BY taken_year ORDER BY taken_year DESC")
+            groups = self.engine.fetchall(
+                connection,
+                (
+                    "SELECT taken_year AS year, COUNT(*) AS picture_count "
+                    "FROM pictures WHERE is_missing=0 AND taken_year IS NOT NULL%s "
+                    "GROUP BY taken_year ORDER BY taken_year DESC"
+                ) % policy_sql,
+                policy_params,
+            )
             for group in groups:
-                rep = self.engine.fetchone(connection, "SELECT uri, thumb_uri FROM pictures WHERE is_missing=0 AND taken_year=? ORDER BY taken_at DESC LIMIT 1", (group["year"],))
+                rep = self.engine.fetchone(
+                    connection,
+                    "SELECT uri, thumb_uri FROM pictures "
+                    "WHERE is_missing=0 AND taken_year=?%s "
+                    "ORDER BY taken_at DESC, id DESC LIMIT 1" % policy_sql,
+                    (group["year"], *policy_params),
+                )
                 group.update(rep or {})
             return groups
 
+    def months_for_year(self, year: int) -> List[Dict[str, Any]]:
+        predicate, policy_params = self._rating_predicate("rating", "media_type")
+        policy_sql = " AND " + predicate if predicate else ""
+        with self.engine.transaction() as connection:
+            groups = self.engine.fetchall(
+                connection,
+                "SELECT taken_month AS date_value, COUNT(*) AS picture_count "
+                "FROM pictures WHERE is_missing=0 AND taken_year=? "
+                "AND taken_month IS NOT NULL%s "
+                "GROUP BY taken_month ORDER BY taken_month" % policy_sql,
+                (year, *policy_params),
+            )
+            result = []
+            for group in groups:
+                month = int(group["date_value"])
+                rep = self.engine.fetchone(
+                    connection,
+                    "SELECT uri, thumb_uri FROM pictures "
+                    "WHERE is_missing=0 AND taken_year=? AND taken_month=?%s "
+                    "ORDER BY taken_at DESC, id DESC LIMIT 1" % policy_sql,
+                    (year, month, *policy_params),
+                )
+                row = {"month": month, "picture_count": int(group["picture_count"])}
+                row.update(rep or {})
+                result.append(row)
+            return result
+
+    def days_for_month(self, year: int, month: int) -> List[Dict[str, Any]]:
+        predicate, policy_params = self._rating_predicate("rating", "media_type")
+        policy_sql = " AND " + predicate if predicate else ""
+        with self.engine.transaction() as connection:
+            groups = self.engine.fetchall(
+                connection,
+                "SELECT taken_day AS date_value, COUNT(*) AS picture_count "
+                "FROM pictures WHERE is_missing=0 AND taken_year=? AND taken_month=? "
+                "AND taken_day IS NOT NULL%s "
+                "GROUP BY taken_day ORDER BY taken_day" % policy_sql,
+                (year, month, *policy_params),
+            )
+            result = []
+            for group in groups:
+                day = int(group["date_value"])
+                rep = self.engine.fetchone(
+                    connection,
+                    "SELECT uri, thumb_uri FROM pictures "
+                    "WHERE is_missing=0 AND taken_year=? AND taken_month=? AND taken_day=?%s "
+                    "ORDER BY taken_at DESC, id DESC LIMIT 1" % policy_sql,
+                    (year, month, day, *policy_params),
+                )
+                row = {"day": day, "picture_count": int(group["picture_count"])}
+                row.update(rep or {})
+                result.append(row)
+            return result
+
+    def undated_summary(self) -> Optional[Dict[str, Any]]:
+        predicate, policy_params = self._rating_predicate("rating", "media_type")
+        policy_sql = " AND " + predicate if predicate else ""
+        with self.engine.transaction() as connection:
+            count = self.engine.fetchone(
+                connection,
+                "SELECT COUNT(*) AS picture_count FROM pictures "
+                "WHERE is_missing=0 AND taken_at IS NULL%s" % policy_sql,
+                policy_params,
+            )
+            total = int((count or {}).get("picture_count") or 0)
+            if total == 0:
+                return None
+            rep = self.engine.fetchone(
+                connection,
+                "SELECT uri, thumb_uri FROM pictures "
+                "WHERE is_missing=0 AND taken_at IS NULL%s "
+                "ORDER BY discovered_at DESC, id DESC LIMIT 1" % policy_sql,
+                policy_params,
+            )
+            row: Dict[str, Any] = {"picture_count": total}
+            row.update(rep or {})
+            return row
+
     def cameras(self) -> List[Dict[str, Any]]:
+        predicate, policy_params = self._rating_predicate("rating", "media_type")
+        policy_sql = " AND " + predicate if predicate else ""
         with self.engine.transaction() as connection:
             groups = self.engine.fetchall(connection, """SELECT COALESCE(camera_make,'') AS camera_make, COALESCE(camera_model,'') AS camera_model, COUNT(*) AS picture_count
-                FROM pictures WHERE is_missing=0 AND (camera_make IS NOT NULL OR camera_model IS NOT NULL)
-                GROUP BY COALESCE(camera_make,''), COALESCE(camera_model,'') ORDER BY picture_count DESC, camera_make, camera_model""")
+                FROM pictures WHERE is_missing=0 AND media_type='picture' AND (camera_make IS NOT NULL OR camera_model IS NOT NULL)
+                %s GROUP BY COALESCE(camera_make,''), COALESCE(camera_model,'') ORDER BY picture_count DESC, camera_make, camera_model""" % policy_sql, policy_params)
             for group in groups:
-                rep = self.engine.fetchone(connection, "SELECT uri, thumb_uri FROM pictures WHERE is_missing=0 AND COALESCE(camera_make,'')=? AND COALESCE(camera_model,'')=? ORDER BY COALESCE(taken_at, discovered_at) DESC LIMIT 1", (group["camera_make"], group["camera_model"]))
+                rep = self.engine.fetchone(connection, "SELECT uri, thumb_uri FROM pictures WHERE is_missing=0 AND media_type='picture' AND COALESCE(camera_make,'')=? AND COALESCE(camera_model,'')=?%s ORDER BY COALESCE(taken_at, discovered_at) DESC LIMIT 1" % policy_sql, (group["camera_make"], group["camera_model"], *policy_params))
                 group.update(rep or {})
             return groups
 
     def tags(self) -> List[Dict[str, Any]]:
+        predicate, policy_params = self._rating_predicate("p.rating")
+        policy_sql = " AND " + predicate if predicate else ""
         with self.engine.transaction() as connection:
             groups = self.engine.fetchall(connection, """SELECT t.id, t.name, COUNT(*) AS picture_count
                 FROM tags t JOIN picture_tags pt ON pt.tag_id=t.id JOIN pictures p ON p.id=pt.picture_id
-                WHERE p.is_missing=0 GROUP BY t.id, t.name ORDER BY picture_count DESC, t.name""")
+                WHERE p.is_missing=0 AND p.media_type='picture'%s GROUP BY t.id, t.name ORDER BY picture_count DESC, t.name""" % policy_sql, policy_params)
             for group in groups:
                 rep = self.engine.fetchone(connection, """SELECT p.uri, p.thumb_uri FROM pictures p JOIN picture_tags pt ON pt.picture_id=p.id
-                    WHERE p.is_missing=0 AND pt.tag_id=? ORDER BY COALESCE(p.taken_at, p.discovered_at) DESC LIMIT 1""", (group["id"],))
+                    WHERE p.is_missing=0 AND p.media_type='picture' AND pt.tag_id=?%s ORDER BY COALESCE(p.taken_at, p.discovered_at) DESC LIMIT 1""" % policy_sql, (group["id"], *policy_params))
                 group.update(rep or {})
             return groups
 

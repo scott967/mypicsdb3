@@ -1,6 +1,338 @@
 # Changelog
 
-## 0.2.4
+## 0.2.37 - 2026-07-27
+
+- Keep Kodi's native recursive slideshow for picture-only album trees, but use
+  the bounded MyPicsDB picture playlist when the selected album tree contains
+  indexed videos.
+- Reuse the scoped mixed-video monitor for mixed album playback so video-to-
+  picture transitions are handled only for explicitly started mixed playlists.
+- Make the add-on's **Debug logging** setting visible in `kodi.log` without
+  requiring Kodi's global debug mode, and add route, media-count, playlist-batch
+  and monitor-state diagnostics.
+- Keep database schema 5 and repository add-on version 0.2.26 unchanged.
+
+## 0.2.36 - 2026-07-27
+
+- Wait until the requested picture container has remained active long enough for
+  Kodi's path-specific view state to begin settling.
+- Apply the configured album view synchronously, verify the active view control
+  and retry only when Kodi performs a late restore to Shift or another saved view.
+- Cancel retries when the user navigates away, preserving the parent menu view.
+- Keep widgets, the main menu and database schema 5 unchanged.
+
+## 0.2.35 - 2026-07-27
+
+- Apply the configured album view only after Kodi reports that the requested
+  picture container is active.
+- Match both the plug-in category and content type before sending
+  `Container.SetViewMode`, preventing search and saved-search results from
+  changing the parent MyPicsDB 3 menu view.
+- Stop using immediate duplicate view-mode commands; time out without touching
+  another container when Kodi does not expose the expected result view.
+- Keep widgets, the main menu and database schema 5 unchanged.
+
+## 0.2.34 - 2026-07-27
+
+- Add **Saved searches** to the add-on menu and allow the current global text
+  search to be saved, reopened with normal pagination and slideshow support,
+  renamed or deleted.
+- Add database schema 5 with a portable `saved_searches` table for SQLite and
+  MySQL/MariaDB. Store canonical Query Model JSON and its explicit version, not
+  raw SQL or query JSON in saved-view plugin URLs.
+- Revalidate the stored query version, JSON structure, fields and operators
+  every time a saved search is opened.
+
+## 0.2.33 - 2026-07-27
+
+- Build large database-backed slideshows in bounded JSON-RPC batches instead of
+  sending up to 5,000 media paths in one oversized `Playlist.Add` request.
+- Drop empty and duplicate media URIs while preserving catalogue order and
+  recalculate **Play slideshow from here** against the cleaned playlist.
+- Keep the mixed-video monitor inactive while the playlist is being assembled,
+  arm it only after playback starts successfully, and clear a partially built
+  playlist when Kodi rejects an add or open request.
+- Keep native recursive album slideshows unchanged and retain database schema 4.
+
+## 0.2.32 - 2026-07-27
+
+- Prefer the newest eligible picture as artwork for recent, random and folder
+  album rows, even when a newer video exists in the same album.
+- Keep the newest media timestamps for recent-album ordering instead of letting
+  the picture-first artwork choice change album recency.
+- Fall back to video artwork for albums that contain no pictures.
+- Keep database schema 4 and avoid modifying original media.
+
+## 0.2.31 - 2026-07-27
+
+- Treat a directory-listing failure as an incomplete source traversal and skip
+  missing-file and missing-folder marking for that source.
+- Keep previously indexed media active when a listed file temporarily fails
+  stat or metadata access.
+- Record incomplete scans with the explicit `partial` status while continuing
+  to index media from folders that were read successfully.
+- Mark genuine deletions on the next complete scan without changing database
+  schema 4.
+
+## 0.2.30 - 2026-07-27
+
+- Treat a migration lock held by another MyPicsDB 3 process as a temporary
+  database-busy state instead of exposing a plug-in failure.
+- Show a clear retry message for interactive browser requests while allowing
+  widgets to return a successful, uncached empty directory without a popup.
+- Let the background service wait briefly and retry database initialization,
+  while still stopping promptly when Kodi is shutting down.
+- Keep other migration and database failures visible instead of hiding them
+  behind the temporary-busy handling.
+
+## 0.2.29 - 2026-07-27
+
+- Run the mixed-slideshow video monitor only while an explicitly started
+  database-backed MyPicsDB 3 playlist contains video.
+- Keep native recursive album slideshows free from MyPicsDB 3 JSON-RPC polling
+  and automatic `Player.GoTo` calls.
+- Clear stale mixed-slideshow session state after playback stops, while allowing
+  a short startup grace period before Kodi reports an active player.
+
+## 0.2.28 - 2026-07-27
+
+- Use Kodi's native recursive folder slideshow when starting a slideshow from an
+  album, allowing Kodi to handle picture/video transitions and consecutive
+  videos directly.
+- Keep the database-backed mixed playlist for result sets that can span
+  unrelated folders, such as searches and other catalogue views.
+- Avoid the rapid MJPEG playback and difficult-to-stop sequence seen when the
+  custom mixed-slideshow video monitor was disabled during diagnosis.
+
+## 0.2.27 - 2026-07-26
+
+- Keep the repository add-on on its own version instead of bumping it for every
+  MyPicsDB 3 plug-in release, preventing Kodi from replacing the repository
+  while it is being used for an update check.
+- Reuse the exact previously published repository archive when its version and
+  contents are unchanged, and fail the Pages build if repository files change
+  without a version bump.
+- Do not attach an unchanged repository zip to plug-in-only GitHub releases.
+
+## 0.2.26 - 2026-07-26
+
+- Bump the Estuary MyPicsDB 3 skin package revisions so Kodi installs the
+  home-screen XML added in 0.2.24.
+- Ensure **On this day** and **On this day - random** can both appear when both
+  rows are enabled. Existing installations update from skin 21.3.5 to 21.3.6
+  on Kodi 21.3.
+
+## 0.2.25 - 2026-07-26
+
+- Treat Kodi's early `System.OnQuit` and `System.OnRestart` notifications as
+  immediate cancellation signals for the service and manual scans.
+- Reuse the shutdown-aware monitor during in-place add-on update retries so
+  service initialization cannot continue after Kodi has begun exiting.
+- Recheck shutdown state immediately before starting an automatic scan and
+  after a cancelled scan, preventing delayed background work during exit.
+
+## 0.2.24 - 2026-07-26
+
+- Restored the chronological **On this day** home-screen row as a separate choice.
+- Added **On this day - random** as an independent home-screen row so either or both can be enabled.
+- Explicitly shuffles random On this day results before returning them.
+- Keeps nine visible home rows while exposing ten configurable view types.
+
+## 0.2.23 - 2026-07-26
+
+- Keep the chronological **On this day** browser and add a random variant that
+  samples matching dates across all earlier years; the Estuary home row now
+  uses the random variant without changing saved row settings.
+- Apply the configured default album view consistently to interactive picture,
+  album, date, camera and keyword browsers while leaving widget layouts to the
+  skin.
+- Run both full and selected-source manual scans with Kodi's non-modal
+  background progress indicator, including pause/resume during playback.
+- Advance the picture playlist automatically after an indexed video finishes
+  in a mixed slideshow, avoiding the repeated black-screen image-load loop.
+
+## 0.2.22 - 2026-07-25
+
+- Add optional indexing for common home-video formats alongside pictures.
+- Add schema 4 with a backward-compatible `pictures.media_type` column and
+  index for SQLite and MySQL/MariaDB; existing rows migrate as pictures.
+- Add a dedicated Videos browser node and mark video list items playable in
+  Kodi while keeping picture-only metadata views unchanged.
+- Add database-backed mixed picture/video slideshows using Kodi picture
+  playlist 2, including filtered result order and recursive album playback.
+- Let minimum-picture-rating policies include videos without assigning fake
+  ratings to video records.
+- Document video setup, current metadata limitations and cleanup behaviour.
+- Reconcile a lowered schema marker with already-recorded later migrations without
+  inserting duplicate MySQL/MariaDB migration-history rows.
+
+## 0.2.21 - 2026-07-25
+
+- Always exclude Synology `@eaDir` metadata trees, including directory names
+  that end with `@eaDir`, even when an older profile has no matching custom
+  exclusion setting.
+- Add a General-settings editor for choosing which catalogue browsing nodes are
+  visible in the MyPicsDB 3 add-on menu.
+- Keep Search, Picture sources, Scan now, Scan status and Settings available so
+  catalogue management cannot be hidden accidentally.
+
+## 0.2.20 - 2026-07-25
+
+- Queue the date-sensitive home-screen refresh instead of reloading the skin
+  immediately at midnight.
+- Wait 60 seconds after the date changes and retry while Kodi is scanning a
+  library, playing media, showing a modal dialog, running the screen saver or
+  using DPMS.
+- Defer the custom Estuary reload until the Home window is active, while other
+  skins continue to use a normal container refresh.
+- Keep the refresh request pending after transient GUI errors and log when it is
+  deferred or completed.
+
+## 0.2.19 - 2026-07-24
+
+- Add skin-independent global search from the MyPicsDB 3 main menu.
+- Normalize Unicode search text with NFKC and case folding, retain Swedish
+  letters, and require every entered word to match the same picture.
+- Search filename, caption, keywords, URI/path parts, camera and stored
+  location fields through Query Model version 1 with bound SQL parameters.
+- Raise the catalogue to schema 3 with normalized per-picture search documents,
+  a retry-safe batch backfill and ongoing scanner maintenance.
+- Preserve minimum-rating policy, temporary all-picture browsing and pagination
+  across search results on SQLite and MySQL/MariaDB.
+
+## 0.2.18 - 2026-07-24
+
+- Add Query Model version 1 as the shared foundation for future search, smart
+  filters, saved views and smart collections without changing database schema 2.
+- Strictly validate nested all/any/not groups, bounded values, registered fields,
+  operators, scopes and stable sort definitions.
+- Compile only trusted SQL fragments with bound parameters for SQLite and
+  MySQL/MariaDB, including catalogue page and count execution.
+- Add deterministic canonical JSON, minimum-rating-policy control and backend
+  parity coverage.
+
+## 0.2.17 - 2026-07-24
+
+- Add **Minimum picture rating** to the Kodi context menu throughout MyPicsDB 3.
+- Remove the duplicate **Save current view as album default** entry inside albums.
+
+## 0.2.16 - 2026-07-24
+
+- Add a local minimum-rating display policy without changing database schema 2.
+- Distinguish pictures without a stored rating from pictures with explicit rating 0.
+- Apply the policy consistently to picture lists, widgets, album counts and artwork,
+  date groups, cameras and keywords while leaving scans and stored metadata unchanged.
+- Show the active policy in Kodi and allow a temporary all-pictures browsing session.
+- Add SQLite coverage and an opt-in MySQL/MariaDB parity test.
+
+## 0.2.15 - 2026-07-23
+
+- Add schema version 2 with an idempotent year-first date-browsing index for
+  SQLite and MySQL/MariaDB.
+- Change the Years browser to drill down through year, month and day before
+  showing pictures.
+- Add a No date folder for pictures without an embedded capture date.
+- Preserve route parameters on paginated date, camera and keyword views.
+- Extend fresh-database, schema-1 upgrade, catalogue, Kodi UI and MariaDB tests.
+
+## 0.2.14 - 2026-07-23
+
+- Align the add-on, repository and core package release versions and update the
+  published release notes for the migration foundation.
+- Make source verification fail when the add-on, repository and Python package
+  versions differ.
+- Extend the MariaDB integration test to bootstrap migration history for an
+  existing schema-1 catalogue, preserve its data and verify an idempotent rerun.
+
+## 0.2.13 - 2026-07-23
+
+- Add a versioned, checksummed migration runner while retaining schema version 1.
+- Register existing schema-1 databases as a baseline only after creating an
+  atomic, integrity-checked SQLite backup.
+- Refuse newer database schemas before structural writes and coordinate schema
+  work with catalogue scans through mutually exclusive locks.
+- Add MySQL/MariaDB migration preflight plus read-only current and legacy schema
+  inspection tools.
+- Document migration design, backup and recovery, and the requirements for the
+  first real schema-2 change.
+
+## 0.2.12 - 2026-07-22
+
+- Let the Estuary MyPicsDB 3 home rows load the configured number of items
+  instead of always stopping at 15.
+- Keep 15 as the default and cap the home-row setting at 50 to limit database,
+  artwork and memory overhead.
+- Parameterize Estuary's poster widget limit while preserving the standard
+  Estuary limit of 15 for every non-MyPicsDB widget.
+
+## 0.2.11 - 2026-07-21
+
+- Stop full foreground scans when Kodi requests shutdown, rather than checking
+  only the progress dialog's Cancel button.
+- Avoid progress updates, notifications and container refreshes after Kodi has
+  begun shutting down for both foreground and selected-source scans.
+- Check for cancellation before and after Kodi VFS directory, stat, stream and
+  metadata-materialisation operations so a scan stops as soon as a blocked SMB
+  call returns.
+- Replace the six-hour scan lock with a renewable 30-minute lock. Active scans
+  refresh it every minute, while expired locks are never revived.
+
+## 0.2.10 - 2026-07-21
+
+- Replace the failing programmatic home-screen editor with a packaged XML dialog
+  and close add-on settings before opening it.
+- Fall back to standard Kodi selection dialogs if the visual editor cannot load,
+  instead of showing a fatal add-on error.
+- Add **Save current view as album default** to the Pictures side menu in the
+  generated Estuary MyPicsDB 3 skin and to every item inside an album.
+- Bump the patched Estuary skin revisions so Kodi receives the side-menu change.
+
+## 0.2.9 - 2026-07-21
+
+- Replace the nested home-screen configuration menus with a visual nine-row
+  editor that shows an On/Off control and move-up/move-down buttons for every
+  view.
+- Register **Save current view as album default** as a Kodi context-menu item
+  while browsing MyPicsDB 3 albums.
+- Fall back to a view selector when Kodi cannot report the currently focused
+  album view.
+
+## 0.2.8 - 2026-07-21
+
+- Replace the nine separate home-screen row selectors with one ordered editor
+  where every view can be enabled, disabled, moved up or moved down.
+- Preserve existing home-screen choices and continue writing the legacy row
+  settings used by Estuary MyPicsDB 3.
+- Add a configurable default view for albums under General settings.
+- Add an album context-menu action that saves the currently active view as the
+  new album default.
+
+## 0.2.7 - 2026-07-20
+
+- Add independent repository channels for Kodi 21 Omega and Kodi 22 Piers.
+- Check the official Kodi releases daily and update pinned Estuary sources only
+  after the patch, unit tests, package build and Kodi add-on checker succeed.
+- Retain up to five patched Estuary archives per Kodi channel while advertising
+  only the newest compatible version to Kodi.
+- Preserve the old repository root long enough for installed 0.2.6 repository
+  add-ons to update to the new multi-channel configuration.
+- Keep the previously published repository history in the generated `repo-data`
+  branch used by GitHub Pages.
+
+## 0.2.6 - 2026-07-19
+
+- Hide Kodi's virtual **Picture add-ons** entry from MyPicsDB 3 picture sources.
+- Remove any previously stored copy of that virtual source automatically.
+
+## 0.2.5 - 2026-07-19
+
+- Refresh date-sensitive views automatically after the local date changes so
+  **On this day** does not remain on the previous day.
+- Ask before removing MyPicsDB 3 sources that no longer exist in Kodi, and keep
+  declined removals available for the next manual source refresh.
+- Add quick installation and setup instructions to the README.
+
+## 0.2.4 - 2026-07-17
 
 - Run **Scan selected source** with Kodi's non-modal background progress indicator.
 - Pause selected-source scans during media playback and resume them automatically.

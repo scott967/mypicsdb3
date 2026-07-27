@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import mimetypes
 import os
 import socket
 import time
@@ -8,7 +9,8 @@ from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from .config import Settings
 from .db.catalog import Catalog
-from .filesystem import Filesystem
+from .db.locks import SCAN_LOCK_NAME
+from .filesystem import CancellationAwareFilesystem, Filesystem
 from .metadata import extract_metadata
 from .models import MetadataResult, ScanStats, Source
 from .utils import basename_uri, extension_of, join_uri, local_datetime_from_timestamp, normalize_uri, utc_now
@@ -16,6 +18,14 @@ from .utils import basename_uri, extension_of, join_uri, local_datetime_from_tim
 
 class ScanCancelled(Exception):
     pass
+
+
+class ScanLockLost(RuntimeError):
+    pass
+
+
+SCAN_LOCK_TTL_SECONDS = 1800
+SCAN_LOCK_REFRESH_SECONDS = 60
 
 
 class Scanner:
@@ -30,13 +40,16 @@ class Scanner:
         progress: Optional[Callable[[Source, str, ScanStats], None]] = None,
     ):
         self.catalog = catalog
-        self.filesystem = filesystem
         self.settings = settings
         self.logger = logger
         self.metadata_reader = metadata_reader
         self.cancelled = cancelled or (lambda: False)
         self.progress = progress
         self.owner = "%s:%s:%s" % (socket.gethostname(), os.getpid(), uuid.uuid4().hex[:12])
+        self._scan_lock_active = False
+        self._scan_lock_refreshed_at = 0.0
+        self._scan_connection = None
+        self.filesystem = CancellationAwareFilesystem(filesystem, self._check_cancelled)
 
     def _is_excluded(self, path: str, name: str) -> bool:
         if self.settings.exclude_hidden and name.startswith("."):
@@ -44,13 +57,53 @@ class Scanner:
         lower = path.casefold()
         return any(fragment in lower for fragment in self.settings.exclude_fragments)
 
+    @staticmethod
+    def _is_synology_metadata_directory(path: str, name: str) -> bool:
+        """Always ignore Synology @eaDir metadata trees.
+
+        This is deliberately independent of the user-editable exclusion list.
+        Existing profiles may have an empty or older saved value, while these
+        directories never contain original library media.
+        """
+        candidates = (name, basename_uri(path))
+        return any(
+            candidate.rstrip("/\\").casefold().endswith("@eadir")
+            for candidate in candidates
+        )
+
+    def _is_excluded_directory(self, path: str, name: str) -> bool:
+        return self._is_synology_metadata_directory(path, name) or self._is_excluded(path, name)
+
     def _check_cancelled(self) -> None:
         if self.cancelled():
             raise ScanCancelled()
+        self._refresh_scan_lock()
+
+    def _refresh_scan_lock(self, force: bool = False) -> None:
+        if not self._scan_lock_active:
+            return
+        now = time.monotonic()
+        if not force and now - self._scan_lock_refreshed_at < SCAN_LOCK_REFRESH_SECONDS:
+            return
+        try:
+            refreshed = self.catalog.refresh_lock(
+                SCAN_LOCK_NAME,
+                self.owner,
+                SCAN_LOCK_TTL_SECONDS,
+                connection=self._scan_connection,
+            )
+        except Exception as exc:
+            raise ScanLockLost("The catalogue scan lock could not be refreshed") from exc
+        if not refreshed:
+            raise ScanLockLost("The catalogue scan lock expired or was taken over")
+        if self._scan_connection is not None:
+            self._scan_connection.commit()
+        self._scan_lock_refreshed_at = now
 
     def scan_sources(self, source_ids: Optional[Sequence[int]] = None) -> ScanStats:
         overall = ScanStats(started_at=utc_now())
         started_monotonic = time.monotonic()
+        self._check_cancelled()
         sources = self.catalog.get_sources(enabled_only=True)
         if source_ids is not None:
             wanted = {int(value) for value in source_ids}
@@ -59,9 +112,12 @@ class Scanner:
             overall.finished_at = utc_now()
             overall.duration_seconds = time.monotonic() - started_monotonic
             return overall
-        if not self.catalog.acquire_lock("catalogue-scan", self.owner):
+        if not self.catalog.acquire_lock(SCAN_LOCK_NAME, self.owner, SCAN_LOCK_TTL_SECONDS):
             raise RuntimeError("Another scan is already running")
+        self._scan_lock_active = True
+        self._scan_lock_refreshed_at = time.monotonic()
         try:
+            self._check_cancelled()
             for source in sources:
                 self._check_cancelled()
                 source_stats = self.scan_source(source)
@@ -69,7 +125,10 @@ class Scanner:
         except ScanCancelled:
             overall.cancelled = True
         finally:
-            self.catalog.release_lock("catalogue-scan", self.owner)
+            try:
+                self.catalog.release_lock(SCAN_LOCK_NAME, self.owner)
+            finally:
+                self._scan_lock_active = False
         overall.finished_at = utc_now()
         overall.duration_seconds = time.monotonic() - started_monotonic
         return overall
@@ -92,8 +151,10 @@ class Scanner:
             return stats
 
         connection = self.catalog.open_scan_connection()
+        self._scan_connection = connection
         scan_started_at = utc_now()
         changed_since_commit = 0
+        traversal_complete = True
         try:
             stack: List[Tuple[str, str, str]] = [(root, "", source.label)]
             visited = set()
@@ -104,7 +165,7 @@ class Scanner:
                 if folder_uri in visited:
                     continue
                 visited.add(folder_uri)
-                if self._is_excluded(folder_uri, folder_name):
+                if self._is_excluded_directory(folder_uri, folder_name):
                     continue
                 folder_id = self.catalog.upsert_folder(connection, source.id, folder_uri, parent_uri, folder_name, scan_started_at)
                 stats.folders_seen += 1
@@ -112,6 +173,7 @@ class Scanner:
                 try:
                     directories, files = self.filesystem.listdir(folder_uri)
                 except Exception as exc:
+                    traversal_complete = False
                     stats.errors += 1
                     stats.error_messages.append("Cannot list %s: %s" % (folder_uri, exc))
                     if self.logger:
@@ -120,7 +182,7 @@ class Scanner:
 
                 for directory in sorted(directories, reverse=True):
                     child_uri = join_uri(folder_uri, directory, directory=True)
-                    if not self._is_excluded(child_uri, directory):
+                    if not self._is_excluded_directory(child_uri, directory):
                         stack.append((child_uri, folder_uri, directory))
 
                 for filename in sorted(files):
@@ -129,19 +191,40 @@ class Scanner:
                     if self._is_excluded(picture_uri, filename):
                         continue
                     extension = extension_of(filename)
-                    if extension not in self.settings.extensions:
+                    if extension in self.settings.extensions:
+                        media_type = "picture"
+                    elif self.settings.include_videos and extension in self.settings.video_extensions:
+                        media_type = "video"
+                    else:
                         continue
                     stats.pictures_seen += 1
                     if self.progress:
                         self.progress(source, picture_uri, stats)
+                    existing = self.catalog.find_picture(connection, picture_uri)
                     try:
                         file_stat = self.filesystem.stat(picture_uri)
-                        existing = self.catalog.find_picture(connection, picture_uri)
-                        if existing and int(existing["file_size"]) == file_stat.size and abs(float(existing["file_mtime"]) - file_stat.mtime) < 0.001:
+                        if (
+                            existing
+                            and str(existing.get("media_type") or "picture") == media_type
+                            and int(existing["file_size"]) == file_stat.size
+                            and abs(float(existing["file_mtime"]) - file_stat.mtime) < 0.001
+                        ):
                             self.catalog.touch_picture(connection, int(existing["id"]), folder_id, source.id, scan_started_at)
                             stats.pictures_unchanged += 1
                         else:
-                            metadata = self.metadata_reader(picture_uri, self.filesystem, self.settings, file_stat.size)
+                            if media_type == "picture":
+                                metadata = self.metadata_reader(
+                                    picture_uri,
+                                    self.filesystem,
+                                    self.settings,
+                                    file_stat.size,
+                                )
+                                self._check_cancelled()
+                            else:
+                                metadata = MetadataResult(
+                                    mime_type=mimetypes.guess_type(filename)[0]
+                                    or "video/%s" % extension,
+                                )
                             if not metadata.taken_at:
                                 metadata.taken_at = local_datetime_from_timestamp(file_stat.mtime)
                                 metadata.taken_source = "File mtime fallback"
@@ -152,6 +235,7 @@ class Scanner:
                                 "uri": picture_uri,
                                 "filename": filename,
                                 "extension": extension,
+                                "media_type": media_type,
                                 "file_size": file_stat.size,
                                 "file_mtime": file_stat.mtime,
                                 "discovered_at": existing.get("discovered_at") if existing else scan_started_at,
@@ -186,27 +270,66 @@ class Scanner:
                         if changed_since_commit >= self.settings.batch_size:
                             connection.commit()
                             changed_since_commit = 0
-                    except ScanCancelled:
+                    except (ScanCancelled, ScanLockLost):
                         raise
                     except Exception as exc:
+                        # The directory entry proves an existing catalogue row is
+                        # still present even when stat or metadata access fails.
+                        # Touch it so a transient SMB/VFS error cannot turn it
+                        # into a missing record at the end of this scan.
+                        if existing:
+                            self.catalog.touch_picture(
+                                connection,
+                                int(existing["id"]),
+                                folder_id,
+                                source.id,
+                                scan_started_at,
+                            )
+                            changed_since_commit += 1
                         stats.errors += 1
                         message = "%s: %s" % (picture_uri, exc)
                         stats.error_messages.append(message)
                         if self.logger:
-                            self.logger.warning("Picture scan error for %s: %s", picture_uri, exc)
+                            self.logger.warning("Media scan error for %s: %s", picture_uri, exc)
 
             self._check_cancelled()
-            stats.missing_marked = self.catalog.mark_missing_after_scan(connection, source.id, scan_started_at)
+            if traversal_complete:
+                stats.missing_marked = self.catalog.mark_missing_after_scan(
+                    connection, source.id, scan_started_at
+                )
+                status = "completed" if stats.errors == 0 else "completed_with_errors"
+            else:
+                # Missing detection is source-wide and must only run after a
+                # complete traversal. One unreadable folder may hide an entire
+                # subtree, so preserving all previously indexed rows is safer
+                # than guessing which unseen paths were actually deleted.
+                status = "partial"
+                safety_message = (
+                    "Incomplete source traversal; missing-record marking was skipped"
+                )
+                stats.error_messages.append(safety_message)
+                if self.logger:
+                    self.logger.warning("%s: %s", root, safety_message)
             self.catalog.update_folder_summaries(connection, source.id)
             connection.commit()
             stats.sources_scanned = 1
-            self.catalog.set_source_scan_state(source.id, True, "completed" if stats.errors == 0 else "completed_with_errors", "\n".join(stats.error_messages[-5:]) or None)
-            self.catalog.finish_scan_run(scan_id, "completed" if stats.errors == 0 else "completed_with_errors", stats, "\n".join(stats.error_messages[-5:]) or None)
+            message = "\n".join(stats.error_messages[-5:]) or None
+            self.catalog.set_source_scan_state(source.id, True, status, message)
+            self.catalog.finish_scan_run(scan_id, status, stats, message)
         except ScanCancelled:
             connection.commit()
             stats.cancelled = True
             self.catalog.set_source_scan_state(source.id, True, "cancelled")
             self.catalog.finish_scan_run(scan_id, "cancelled", stats)
+            raise
+        except ScanLockLost as exc:
+            connection.rollback()
+            stats.errors += 1
+            stats.error_messages.append(str(exc))
+            self.catalog.set_source_scan_state(source.id, True, "failed", str(exc))
+            self.catalog.finish_scan_run(scan_id, "failed", stats, str(exc))
+            if self.logger:
+                self.logger.error("Source scan lost its lock for %s: %s", root, exc)
             raise
         except Exception as exc:
             connection.rollback()
@@ -217,6 +340,7 @@ class Scanner:
             if self.logger:
                 self.logger.error("Source scan failed for %s: %s", root, exc)
         finally:
+            self._scan_connection = None
             connection.close()
             stats.finished_at = utc_now()
             stats.duration_seconds = time.monotonic() - started_monotonic

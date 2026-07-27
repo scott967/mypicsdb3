@@ -1,27 +1,44 @@
 # MyPicsDB 3
 
 MyPicsDB 3 is an independent, community-maintained successor inspired by
-MyPicsDB and MyPicsDB2. It provides a searchable picture catalogue, background
-indexing and fast home-screen widgets for Kodi 21 Omega.
+MyPicsDB and MyPicsDB2. It provides a searchable picture and optional
+home-video catalogue, background indexing, mixed slideshows and fast home-screen
+widgets for Kodi 21 Omega and Kodi 22 Piers.
 
-> Status: 0.2.4 release candidate. The catalogue, SQLite backend, scanner,
+> Status: 0.2.37 development release. The catalogue, SQLite backend, scanner,
 > browser routes, Estuary fork builder and package builder are covered by
-> automated tests. Real Kodi installations are still required for platform and
-> large-library testing before calling the project production-stable.
+> automated tests. The schema-1-to-5 migrations, search-document backfill,
+> mixed-media playlist integration, backup and restore, and large-library search performance still require
+> documented validation on real Kodi installations before calling the project
+> production-stable.
 
 ## Features
 
 - Select one or more existing Kodi picture sources.
-- Incremental foreground, selected-source background and scheduled scanning.
+- Incremental manual and scheduled background scanning.
 - SQLite by default, using WAL mode and a local add-on profile database.
 - Optional shared MySQL/MariaDB catalogue through PyMySQL.
 - EXIF capture date, camera, orientation, dimensions, rating and optional GPS.
 - Basic embedded XMP keywords, rating, location and capture date.
 - IPTC keywords, caption and location through IPTCInfo3 when available.
-- Missing-source safety: an unavailable SMB/NFS source is never interpreted as
-  deletion of every picture.
+- Missing-source safety: an unavailable SMB/NFS source or incomplete directory
+  traversal is never interpreted as deletion of unseen media.
 - Lazy Kodi thumbnail caching; no duplicate thumbnail tree is generated.
-- Favorites, ratings, keywords, cameras, years and geotagged views.
+- Global Unicode-normalized AND search across filename, caption, keywords,
+  path parts, camera and stored location fields.
+- Favorites, ratings, keywords, cameras, year/month/day and geotagged views.
+- Picture-first album artwork, with video fallback for video-only albums.
+- Stable album-view activation that waits for the requested picture container and
+  never changes the parent add-on menu or widget layout.
+- Optional indexing of common home-video formats alongside pictures, including
+  a dedicated **Videos** node and mixed picture/video date and folder views.
+- Native recursive slideshows for picture-only album trees and database-backed
+  mixed playlists for album trees containing video or results spanning multiple
+  folders, with bounded playlist batches.
+- Optional global minimum-rating display policy for normal browser and widget
+  views, with a temporary all-pictures override.
+- Versioned, validated Query Model used by global search and schema-5 saved
+  searches; stored queries are revalidated when opened and never expose raw SQL.
 - Stable widget endpoints for configurable skins.
 - Optional **Estuary MyPicsDB 3** skin with picture rows on the home screen.
 - GitHub Actions, Kodi repository generation and GitHub Pages deployment.
@@ -29,12 +46,14 @@ indexing and fast home-screen widgets for Kodi 21 Omega.
 ## Widget endpoints
 
 ```text
-plugin://plugin.image.mypicsdb3/recent-taken?limit=15
+plugin://plugin.image.mypicsdb3/recent-taken?widget=1&limit=15
 plugin://plugin.image.mypicsdb3/recent-added?limit=15
 plugin://plugin.image.mypicsdb3/random?limit=15
 plugin://plugin.image.mypicsdb3/recent-folders?limit=15
 plugin://plugin.image.mypicsdb3/random-folders?limit=15
 plugin://plugin.image.mypicsdb3/on-this-day?limit=15
+plugin://plugin.image.mypicsdb3/on-this-day-random?limit=15
+plugin://plugin.image.mypicsdb3/videos?limit=15
 plugin://plugin.image.mypicsdb3/years
 plugin://plugin.image.mypicsdb3/cameras
 plugin://plugin.image.mypicsdb3/keywords
@@ -44,6 +63,83 @@ plugin://plugin.image.mypicsdb3/geotagged?limit=15
 ```
 
 Widget calls only read indexed database rows. They never scan picture sources.
+They use the local **Minimum picture rating** display policy.
+
+## Quick install and setup
+
+The steps below are enough to get started. See [Installing MyPicsDB 3](#installing-mypicsdb-3)
+and [Using MyPicsDB 3 in Kodi](#using-mypicsdb-3-in-kodi) for explanations,
+alternatives and troubleshooting.
+
+### Quick install with the MyPicsDB 3 Repository
+
+Use this method if you want Kodi to discover future MyPicsDB 3 and Estuary
+MyPicsDB 3 updates.
+
+1. Download `repository.mypicsdb3-<version>.zip` from the
+   [latest release](https://github.com/raffe1234/mypicsdb3/releases/latest).
+   In Kodi, enable **Unknown sources**, open **Add-ons > Install from zip file**
+   and select the downloaded repository zip.
+2. Open **Add-ons > Install from repository > MyPicsDB 3 Repository > Picture
+   add-ons > MyPicsDB 3** and select **Install**.
+3. Optional: to show MyPicsDB 3 rows directly on the Pictures home screen, open
+   **MyPicsDB 3 Repository > Look and feel > Skin > Estuary MyPicsDB 3** and
+   select **Install**.
+
+### Quick install without the MyPicsDB 3 Repository
+
+Kodi cannot discover MyPicsDB 3 updates through this method. Check the GitHub
+releases yourself and install newer packages manually.
+
+1. Download `plugin.image.mypicsdb3-<version>.zip` from the
+   [latest release](https://github.com/raffe1234/mypicsdb3/releases/latest).
+   In Kodi, enable **Unknown sources**, open **Add-ons > Install from zip file**
+   and select the downloaded add-on zip.
+2. Optional: if you use Estuary and want MyPicsDB 3 rows on the Pictures home
+   screen, download and install `skin.estuary.mypicsdb3-<version>.zip` in the
+   same way, after installing MyPicsDB 3.
+
+### Quick setup
+
+1. Add each photo location under **Pictures > Add pictures...** and verify that
+   Kodi can open it.
+2. Open **Pictures > Picture add-ons > MyPicsDB 3 > Picture sources**. Select
+   **Refresh Kodi sources**, then enable the sources that MyPicsDB 3 should
+   index.
+3. Return to the MyPicsDB 3 main menu and select **Scan now**.
+4. Open **Pictures > Picture add-ons > MyPicsDB 3 > Settings** to adjust:
+   - **General** — widget size, browser page size, the default album view and
+     notifications, plus which browsing nodes are visible in the add-on menu;
+   - **Home screen** — Media sources and the content and order of the Estuary
+     MyPicsDB 3 rows;
+   - **Scanning** — automatic scans, scan timing, playback pauses, picture and
+     optional video file types, exclusions and batch size;
+   - **Metadata** — XMP, IPTC, GPS storage and metadata read limits;
+   - **Database** — local SQLite or a shared MySQL/MariaDB catalogue;
+   - **Maintenance** — missing-record retention and debug logging.
+
+## Optional video support
+
+Video indexing is disabled by default. Enable **Settings > Scanning > Include
+videos**, review the video-extension list and run **Scan now**. Videos are stored
+in the existing catalogue with `media_type=video`. In 0.2.22, their date comes
+from the file modification time and their MIME type is inferred from the
+filename; no separate video scraper or `ffprobe` dependency is used.
+
+Videos appear in folder, recent, date, favorites and search results and in the
+dedicated **Videos** node. Camera, keyword, geolocation and embedded-rating
+views remain picture-only. Minimum-picture-rating policies still include videos
+without assigning a fake rating to them.
+
+Kodi plays an individual video directly. Use **Play slideshow from here** on a
+media item or **Play mixed slideshow** on an album to build Kodi picture playlist
+2 from the current database result. Album playback includes descendants and the
+playlist action is capped at 5,000 media files. A lightweight service monitor
+advances the picture playlist after an indexed video finishes.
+
+Disabling video support does not immediately delete stored rows. Run a new scan
+to mark video rows missing, then use **Scan status > Clean missing records**
+after the configured retention period.
 
 ## Installing MyPicsDB 3
 
@@ -78,7 +174,7 @@ After MyPicsDB 3 is installed:
    **Settings > Interface > Skin**.
 5. Keep the skin when Kodi displays its confirmation dialog.
 
-The skin can show **Media sources** plus nine configurable MyPicsDB 3 rows:
+The skin can show **Media sources** plus nine configurable MyPicsDB 3 rows. Ten view types are available, so either On this day variant or both can be enabled:
 
 - Recently taken
 - Recently added
@@ -86,6 +182,7 @@ The skin can show **Media sources** plus nine configurable MyPicsDB 3 rows:
 - Recent albums
 - Random albums
 - On this day
+- On this day - random
 - Favorites
 - Rated pictures
 - Geotagged pictures
@@ -93,19 +190,28 @@ The skin can show **Media sources** plus nine configurable MyPicsDB 3 rows:
 Open **Pictures > Picture add-ons > MyPicsDB 3 > Settings > Home screen** to:
 
 - show or hide Media sources;
-- choose the content of Row 1 through Row 9;
-- set a row to None;
-- arrange the rows in any order.
+- open **Configure home-screen rows**;
+- enable or disable each available view;
+- move a view up or down to change the order.
 
-The first six rows are enabled by default in the order shown above through
-**On this day**. Row 7 through Row 9 default to **None**, so the initial Pictures
-home screen stays compact. Set any position to Favorites, Rated pictures,
-Geotagged pictures or another view when you want to show more rows.
+The visual editor lists every view once in the same order used on the Pictures
+home screen. Every row has its own **On/Off**, **Move up** and **Move down**
+controls. The first six views are enabled by default through **On this day**.
+On this day - random, Favorites, Rated pictures and Geotagged pictures are
+disabled by default, so the initial home screen stays compact. At most nine
+views can be enabled at the same time. Existing Row 1 through Row 9 choices are
+migrated automatically the first time the editor is opened.
 
-Each row position is independent, so avoid selecting the same view in more than
-one position unless duplicate rows are intentional. A row set to **None** is not
-shown. Rows with no indexed results also disappear until matching pictures have
-been indexed.
+Rows with no indexed results disappear until matching pictures have been
+indexed.
+
+### Default album view
+
+Choose the view used when an album opens under **Settings > General > Default
+album view**. The default remains **Wide list**. You can also open an album,
+switch to another view and use **Save current view as album default** from the
+left-side **View options** menu in Estuary MyPicsDB 3. The same action is also
+available from the context menu of each picture or subalbum.
 
 ### Alternative: install a package directly
 
@@ -154,15 +260,18 @@ Every newly discovered source is disabled by default.
 - The source label changes from **Disabled** to **Enabled**.
 - Use the context menu to enable, disable or start a background scan of only that source.
 - Select **Refresh Kodi sources** after adding, removing or renaming a source in
-  Kodi.
+  Kodi. If a saved MyPicsDB 3 source no longer exists in Kodi, MyPicsDB 3 asks
+  whether to remove it and its indexed pictures. Select **No** to keep it; the
+  question is shown again the next time you refresh Kodi sources.
 
 Only enabled sources are included in normal manual and automatic scans.
 
 #### Replacing a test source with the real picture library
 
 Disable the test source in MyPicsDB 3 before removing it from Kodi. Add or verify
-the real Kodi picture source, select **Refresh Kodi sources**, and enable only
-the real source before scanning it.
+the real Kodi picture source, select **Refresh Kodi sources**, remove the old
+test source from MyPicsDB 3 when prompted, and enable only the real source before
+scanning it.
 
 MyPicsDB 3 deliberately keeps indexed records when a source disappears, because
 a temporarily unavailable NAS must not be treated as mass deletion. If the
@@ -174,18 +283,19 @@ production scan. Do not remove a shared MySQL/MariaDB catalogue this way.
 ### 3. Run the first scan
 
 Return to the MyPicsDB 3 main menu and select **Scan now**. The scan is
-recursive. It visits enabled sources, indexes supported picture files and
-stores the catalogue in the selected database. **Scan now** keeps its foreground
-progress dialog and can be cancelled from that dialog.
+recursive. It visits enabled sources, indexes supported media files and stores
+the catalogue in the selected database. It uses Kodi's non-modal background
+progress indicator, so you can continue using the interface. Exiting Kodi
+cancels the scan safely.
 
-The first scan can take time on a large local collection or NAS. It is safe to
-cancel the progress dialog and continue later. Subsequent scans are incremental:
-unchanged files are not read and indexed again.
+The first scan can take time on a large local collection or NAS. Subsequent
+scans are incremental: unchanged files are not read and indexed again.
 
-If Scan status reports directory-listing or other traversal errors, investigate
-them before using **Clean missing records**. A source whose root is completely
-unavailable is protected from mass deletion, but a partially unreadable folder
-tree must be treated as an incomplete scan.
+If a folder cannot be listed, Scan status reports `partial`. MyPicsDB 3 still
+indexes folders that were read successfully, but it skips missing-record
+marking for that source. Genuine deletions are marked during the
+next complete scan. Investigate repeated traversal errors before using **Clean
+missing records**.
 
 Open **Scan status** after a scan to see:
 
@@ -208,11 +318,17 @@ After the first successful scan, the add-on main menu provides:
 - **Random memories** — a random selection from the catalogue;
 - **Recent albums** and **Random albums** — folders represented by indexed
   pictures;
-- **On this day** — pictures captured on today's month and day in earlier years;
-- **Years**, **Cameras** and **Keywords** — metadata-based navigation;
+- **On this day** — all matching pictures from earlier years, newest year first;
+- **On this day - random** — a freshly shuffled sample across all matching earlier years;
+- **Years** — browse by year, then month and day, with a separate **No date** folder;
+- **Cameras** and **Keywords** — metadata-based navigation;
 - **Favorites** — pictures marked through the Kodi context menu;
 - **Rated pictures** — pictures with an embedded metadata rating;
 - **Geotagged pictures** — pictures with stored GPS coordinates.
+
+Open **Settings > General > Configure add-on menu** to show or hide any of
+these catalogue browsing nodes. Search, Picture sources, Scan now, Scan
+status and Settings always remain visible.
 
 Open the context menu on a picture and select **Toggle favorite** to add or
 remove it from Favorites. **Open containing album** opens the indexed folder.
@@ -226,7 +342,67 @@ The configurable extension list includes formats such as HEIC, HEIF and AVIF.
 Indexing an extension does not guarantee that every Kodi platform or installed
 image decoder can display that format.
 
-### 5. Configure automatic scanning
+Synology `@eaDir` metadata directories are always ignored, even if the custom
+exclusion setting is empty. A rescan marks thumbnails that were indexed by an
+older version as missing; the normal missing-record cleanup can then remove
+their retained database rows.
+
+The background service detects a local date change while Kodi is running and
+refreshes date-sensitive views. On the Estuary MyPicsDB 3 home screen, the skin
+is reloaded once after midnight so both **On this day** views change without manual action.
+
+### 5. Search the whole catalogue
+
+Select **Search** at the top of the MyPicsDB 3 main menu and enter one or more
+words. Search covers indexed filename, caption, keywords, path parts, camera
+make/model, city, state, country and sublocation. Punctuation separates words.
+Unicode text is normalized and case-folded, so Swedish letters such as å, ä and
+ö are retained.
+
+Multiple words use AND semantics: every word must occur somewhere in the same
+picture's search document, but the words may come from different fields. For
+example, `fujifilm göteborg sommar` can match a camera make, a city and a
+keyword on one picture. Version 0.2.19 does not implement phrase search, fuzzy
+matching or prefix completion.
+
+The configured minimum-rating policy also applies to search results. Use
+**Show all pictures temporarily** from the main menu before searching to bypass
+the policy for that browsing session.
+
+### 6. Configure the minimum-rating display policy
+
+Open the context menu anywhere inside MyPicsDB 3 and select **Minimum
+picture rating**, or open **MyPicsDB 3 > Settings > General > Minimum picture
+rating**, to choose which pictures normal browser and widget views should show:
+
+- **All pictures** includes pictures with no stored rating, explicit rating 0,
+  and ratings 1 through 5.
+- **Rated and unrated (exclude rating 0)** includes pictures with no stored
+  rating and ratings 1 through 5, but hides explicit rating 0.
+- **Rating 1 or higher** through **Rating 5** show only pictures at or above
+  the selected threshold.
+
+The policy applies to picture lists, album counts and representative artwork,
+date groups, cameras, keywords and home-screen widgets. It does not change
+scanning, metadata extraction or stored database values. The active policy is
+shown in the browser category. Open **Show all pictures temporarily** from the
+add-on main menu to bypass the configured policy for that browsing session.
+
+### 7. Query Model and global search
+
+Version 0.2.19 extends Query Model version 1 with the allowlisted `text` /
+`contains_tokens` rule used by Kodi global search. The model still validates
+nested all/any/not rules for rating, favorite, source, album, date range,
+camera and keyword, and compiles only trusted SQL with bound parameters for
+SQLite and MySQL/MariaDB.
+
+Search text is never copied into SQL. It is converted to normalized tokens and
+matched against schema-3 search documents maintained by scans and the schema-2
+to schema-3 migration. This release does not add a general Kodi query-builder,
+saved views or smart collections. See [Query Model version 1](docs/QUERY_MODEL.md)
+and [Global search](docs/GLOBAL_SEARCH.md).
+
+### 8. Configure automatic scanning
 
 Open **MyPicsDB 3 > Settings > Scanning** and enable **Enable automatic
 scanning**. Set **Automatic scan interval (hours)** to any whole number from 1
@@ -241,12 +417,13 @@ The background service waits for the configured startup delay and then runs an
 incremental scan. By default, automatic scanning is disabled and scans are
 paused while Kodi is playing media. **Scan now** remains available at any time.
 
-**Scan selected source** uses Kodi's non-modal background progress indicator,
-so the interface remains available. When **Pause scans during media playback**
-is enabled, the selected-source scan pauses at the next file or folder checkpoint
-after playback starts and resumes automatically after playback stops. This
-applies to movies, TV episodes, music and other media playback. The background
-indicator does not provide a cancel button; exiting Kodi cancels the scan safely.
+Both **Scan now** and **Scan selected source** use Kodi's non-modal background
+progress indicator, so the interface remains available. When **Pause scans
+during media playback** is enabled, a manual scan pauses at the next file or
+folder checkpoint after playback starts and resumes automatically after playback
+stops. This applies to movies, TV episodes, music and other media playback. The
+background indicator does not provide a cancel button; exiting Kodi cancels the
+scan safely.
 
 For one Kodi device, keep the default SQLite backend. Configure MySQL/MariaDB
 only when multiple Kodi devices need to share the same catalogue and all clients
@@ -266,14 +443,15 @@ A Kodi update or standard Estuary update therefore does not overwrite the
 MyPicsDB 3 skin. The selected MyPicsDB 3 skin remains installed and receives its
 own updates through the MyPicsDB 3 repository.
 
-Two limitations remain:
+The repository maintains separate Estuary channels for Kodi 21 Omega and Kodi
+22 Piers. Kodi selects the matching channel from the repository add-on's
+`minversion` and `maxversion` ranges. A scheduled GitHub Actions workflow checks
+the official Kodi releases once per day, patches and validates a new Estuary
+source, and publishes it only if every test succeeds.
 
-1. Upstream Estuary fixes are not inherited automatically. Each MyPicsDB 3 skin
-   release is rebuilt from a pinned official Kodi Estuary source tag and then
-   patched. The current build is based on `21.3-Omega`.
-2. A future Kodi major version can introduce a new skin API. Kodi may disable an
-   incompatible skin and fall back to standard Estuary until a compatible
-   MyPicsDB 3 skin release is installed.
+A future Kodi major version can still introduce a new skin API. Until a matching
+channel is configured and validated, Kodi can disable the custom skin and fall
+back to standard Estuary.
 
 Standard Estuary is never removed and can always be selected again under
 **Settings > Interface > Skin**.
@@ -289,8 +467,12 @@ tested by this project.
 SQLite is recommended for one Kodi device. The database is stored under the
 add-on profile directory and must not be moved to SMB/NFS.
 
-The current release records a schema version but does not yet implement database
-migrations between schema versions. Back up the add-on profile before testing a
+The current development release uses schema version 3 for both SQLite and
+MySQL/MariaDB. Schema 2 adds the year-first date-browsing index. Schema 3 adds
+one normalized search document per picture and backfills existing catalogues.
+Existing SQLite databases receive an atomic, integrity-checked backup before a
+schema migration; MySQL/MariaDB operators must keep an external backup. See
+[docs/DATABASE_MIGRATIONS.md](docs/DATABASE_MIGRATIONS.md) before testing a
 development build that changes the catalogue schema.
 
 MySQL/MariaDB is useful when several Kodi devices see identical picture URIs.
@@ -304,15 +486,25 @@ python3 tools/verify.py
 python3 tools/build.py
 ```
 
-`tools/build.py` downloads the official Kodi source archive pinned in
-`contrib/estuary/upstream.json`, extracts only `skin.estuary`, applies the
-MyPicsDB 3 home-screen patch and packages the independent skin.
+`tools/build.py` downloads the latest pinned official Estuary source for each
+configured Kodi channel, extracts only `skin.estuary`, applies the MyPicsDB 3
+home-screen patch and builds separate Omega and Piers repository indexes.
 
-For an offline or local-source build:
+For an offline or local-source build, select exactly one channel:
 
 ```bash
-python3 tools/build.py --estuary-source /path/to/skin.estuary
+python3 tools/build.py --channel omega --estuary-source /path/to/skin.estuary
 ```
+
+To refresh the release pins manually from the official Kodi GitHub releases:
+
+```bash
+python3 tools/update_estuary_upstreams.py
+```
+
+GitHub Pages passes the previous published `repository/` tree back to the
+builder. The builder adds the new patched skin, retains at most five archives
+per channel and lists only the newest compatible skin in `addons.xml`.
 
 Build output:
 
@@ -329,7 +521,7 @@ dist/repository/
 The generated skin source is placed temporarily under:
 
 ```text
-build/skin.estuary.mypicsdb3/
+build/estuary/<channel>/<skin-version>/skin.estuary.mypicsdb3/
 ```
 
 Generated upstream skin files are deliberately excluded from the source archive
@@ -343,7 +535,8 @@ and the included Pages workflow has deployed, Kodi can discover picture add-on
 and skin updates from:
 
 ```text
-https://raffe1234.github.io/mypicsdb3/repository/
+https://raffe1234.github.io/mypicsdb3/repository/omega/
+https://raffe1234.github.io/mypicsdb3/repository/piers/
 ```
 
 Change the URLs in `repository.mypicsdb3/addon.xml` and add-on metadata if the
@@ -382,10 +575,17 @@ authors. Contributions and issue reports are welcome.
 
 ## Versioning and releases
 
-Update the MyPicsDB 3 plug-in and repository versions with:
+Update the MyPicsDB 3 plug-in version with:
 
 ```bash
 python3 tools/set_version.py 0.3.0
+```
+
+The repository add-on keeps its existing version during normal plug-in
+releases. Bump it only when `repository.mypicsdb3` itself changes:
+
+```bash
+python3 tools/set_version.py 0.3.0 --repository-version 0.3.0
 ```
 
 The skin version and pinned upstream Kodi tag are maintained separately in
@@ -397,12 +597,16 @@ builds all three Kodi packages and attaches the archives to the GitHub release.
 
 In **Settings > General**, the numeric values are shown with descriptive labels:
 
-- **Default items per home-screen row**
+- **Default items per home-screen row** — 15 by default, configurable from 1 to 50
 - **Pictures per browser page**
+- **Default album view**
 
-In **Settings > Home screen**, each of the nine positions shows both its row
-number and the currently selected content. The default selections are visible
-without first opening each setting.
+**Configure add-on menu** opens a multi-select dialog for the twelve catalogue
+browsing nodes shown between Picture sources and the scan actions.
+
+In **Settings > Home screen**, **Configure home-screen rows** opens a visual
+nine-row editor. Each row has an **On/Off** control plus buttons for moving the
+view up or down.
 
 ### Repository artwork paths
 

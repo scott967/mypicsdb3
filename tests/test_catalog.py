@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Optional
 
 from mypicsdb3.config import Settings
 from mypicsdb3.db.catalog import Catalog
 from mypicsdb3.db.engine import DatabaseEngine
-from mypicsdb3.utils import utc_now
+from mypicsdb3.utils import sha256_text, utc_now
 
 
 def make_catalog(tmp_path: Path) -> Catalog:
@@ -15,7 +16,15 @@ def make_catalog(tmp_path: Path) -> Catalog:
     return catalog
 
 
-def add_picture(catalog: Catalog, root: Path, name: str = "image.jpg") -> int:
+def add_picture(
+    catalog: Catalog,
+    root: Path,
+    name: str = "image.jpg",
+    taken_at: Optional[str] = "2020-07-17 14:15:16",
+    discovered_at: str = "2026-07-17 09:00:00",
+    rating: Optional[int] = 5,
+    media_type: str = "picture",
+) -> int:
     source = catalog.sync_sources([{"label": "Photos", "uri": str(root)}])[0]
     catalog.set_source_enabled(source.id, True)
     now = utc_now()
@@ -28,12 +37,13 @@ def add_picture(catalog: Catalog, root: Path, name: str = "image.jpg") -> int:
                 "folder_id": folder_id,
                 "uri": str(root / name),
                 "filename": name,
-                "extension": "jpg",
+                "extension": "mp4" if media_type == "video" else "jpg",
+                "media_type": media_type,
                 "file_size": 123,
                 "file_mtime": 1000.0,
-                "discovered_at": "2026-07-17 09:00:00",
+                "discovered_at": discovered_at,
                 "last_seen_at": now,
-                "taken_at": "2020-07-17 14:15:16",
+                "taken_at": taken_at,
                 "taken_source": "EXIF DateTimeOriginal",
                 "width": 1920,
                 "height": 1080,
@@ -41,7 +51,7 @@ def add_picture(catalog: Catalog, root: Path, name: str = "image.jpg") -> int:
                 "mime_type": "image/jpeg",
                 "camera_make": "Canon",
                 "camera_model": "EOS R6",
-                "rating": 5,
+                "rating": rating,
                 "gps_latitude": 59.3293,
                 "gps_longitude": 18.0686,
                 "city": "Stockholm",
@@ -83,9 +93,217 @@ def test_catalog_queries_and_favorites(tmp_path: Path) -> None:
     assert catalog.geotagged(10)[0]["city"] == "Stockholm"
 
 
+def test_album_art_prefers_a_picture_over_a_newer_video(tmp_path: Path) -> None:
+    catalog = make_catalog(tmp_path)
+    root = tmp_path / "mixed-album"
+    picture_id = add_picture(
+        catalog,
+        root,
+        "cover.jpg",
+        taken_at="2024-01-01 12:00:00",
+        discovered_at="2026-07-20 09:00:00",
+    )
+    add_picture(
+        catalog,
+        root,
+        "latest.mp4",
+        taken_at="2026-06-21 03:15:00",
+        discovered_at="2026-07-21 09:00:00",
+        media_type="video",
+    )
+
+    recent = catalog.recent_folders(10)[0]
+    random_album = catalog.random_folders(10)[0]
+
+    assert recent["representative_uri"].endswith("cover.jpg")
+    assert random_album["representative_uri"].endswith("cover.jpg")
+    with catalog.engine.transaction() as connection:
+        summary = catalog.engine.fetchone(
+            connection,
+            "SELECT representative_picture_id, latest_taken_at, latest_discovered_at "
+            "FROM folders WHERE id=?",
+            (recent["id"],),
+        )
+    assert summary["representative_picture_id"] == picture_id
+    assert summary["latest_taken_at"] == "2026-06-21 03:15:00"
+    assert summary["latest_discovered_at"] == "2026-07-21 09:00:00"
+
+
+def test_video_only_album_keeps_video_as_fallback_art(tmp_path: Path) -> None:
+    catalog = make_catalog(tmp_path)
+    root = tmp_path / "video-album"
+    video_id = add_picture(
+        catalog,
+        root,
+        "only.mp4",
+        taken_at="2026-06-21 00:15:53",
+        media_type="video",
+    )
+
+    album = catalog.recent_folders(10)[0]
+
+    assert album["representative_uri"].endswith("only.mp4")
+    with catalog.engine.transaction() as connection:
+        summary = catalog.engine.fetchone(
+            connection,
+            "SELECT representative_picture_id FROM folders WHERE id=?",
+            (album["id"],),
+        )
+    assert summary["representative_picture_id"] == video_id
+
+
+def test_date_hierarchy_and_undated_queries(tmp_path: Path) -> None:
+    catalog = make_catalog(tmp_path)
+    root = tmp_path / "photos"
+    first = add_picture(catalog, root, "first.jpg", "2020-07-17 14:15:16")
+    second = add_picture(catalog, root, "second.jpg", "2020-07-18 09:00:00")
+    third = add_picture(catalog, root, "third.jpg", "2021-12-25 18:30:00")
+    undated = add_picture(
+        catalog,
+        root,
+        "undated.jpg",
+        None,
+        discovered_at="2026-07-20 11:00:00",
+    )
+
+    assert [(row["year"], row["picture_count"]) for row in catalog.years()] == [
+        (2021, 1),
+        (2020, 2),
+    ]
+    assert [(row["month"], row["picture_count"]) for row in catalog.months_for_year(2020)] == [
+        (7, 2),
+    ]
+    assert [(row["day"], row["picture_count"]) for row in catalog.days_for_month(2020, 7)] == [
+        (17, 1),
+        (18, 1),
+    ]
+    assert [row["id"] for row in catalog.pictures_for_day(2020, 7, 17, 10)] == [first]
+    assert [row["id"] for row in catalog.pictures_for_day(2020, 7, 18, 10)] == [second]
+    assert [row["id"] for row in catalog.pictures_for_day(2021, 12, 25, 10)] == [third]
+    assert catalog.undated_summary()["picture_count"] == 1
+    assert [row["id"] for row in catalog.pictures_without_date(10)] == [undated]
+
+
 def test_scan_lock_is_exclusive(tmp_path: Path) -> None:
     catalog = make_catalog(tmp_path)
     assert catalog.acquire_lock("catalogue-scan", "first", ttl_seconds=60)
     assert not catalog.acquire_lock("catalogue-scan", "second", ttl_seconds=60)
     catalog.release_lock("catalogue-scan", "first")
     assert catalog.acquire_lock("catalogue-scan", "second", ttl_seconds=60)
+
+
+def test_scan_lock_can_be_refreshed_but_expired_lock_is_not_revived(tmp_path: Path) -> None:
+    catalog = make_catalog(tmp_path)
+    assert catalog.acquire_lock("catalogue-scan", "first", ttl_seconds=60)
+    assert not catalog.refresh_lock("catalogue-scan", "second", ttl_seconds=120)
+    assert catalog.refresh_lock("catalogue-scan", "first", ttl_seconds=120)
+
+    with catalog.engine.transaction() as connection:
+        catalog.engine.execute(
+            connection,
+            "UPDATE locks SET expires_at=? WHERE name=?",
+            ("2000-01-01 00:00:00", "catalogue-scan"),
+        ).close()
+
+    assert not catalog.refresh_lock("catalogue-scan", "first", ttl_seconds=120)
+    assert catalog.acquire_lock("catalogue-scan", "second", ttl_seconds=60)
+
+
+def test_delete_source_removes_its_catalogue_rows(tmp_path: Path) -> None:
+    catalog = make_catalog(tmp_path)
+    add_picture(catalog, tmp_path / "photos")
+    source = catalog.get_sources()[0]
+
+    assert catalog.delete_source(source.id) is True
+    assert catalog.get_sources() == []
+    assert catalog.overview()["pictures"] == 0
+    assert catalog.overview()["folders"] == 0
+    assert catalog.tags() == []
+    assert catalog.delete_source(source.id) is False
+
+
+def test_sync_sources_removes_kodi_picture_addons_virtual_source(tmp_path: Path) -> None:
+    catalog = make_catalog(tmp_path)
+    virtual_uri = "addons://sources/image/"
+    now = utc_now()
+    with catalog.engine.transaction() as connection:
+        catalog.engine.execute(
+            connection,
+            "INSERT INTO sources (label, uri, uri_hash, enabled, available, created_at, updated_at) "
+            "VALUES (?, ?, ?, 0, 1, ?, ?)",
+            ("Picture add-ons", virtual_uri, sha256_text(virtual_uri), now, now),
+        ).close()
+
+    sources = catalog.sync_sources([
+        {"label": "Photos", "uri": str(tmp_path / "photos")},
+        {"label": "Picture add-ons", "uri": virtual_uri},
+    ])
+
+    assert [source.label for source in sources] == ["Photos"]
+
+
+def test_videos_share_date_and_folder_views_without_fake_ratings(tmp_path: Path) -> None:
+    catalog = make_catalog(tmp_path)
+    root = tmp_path / "media"
+    picture_id = add_picture(catalog, root, "photo.jpg", rating=5)
+    video_id = add_picture(
+        catalog,
+        root,
+        "clip.mp4",
+        taken_at="2020-07-18 10:00:00",
+        rating=None,
+        media_type="video",
+    )
+
+    assert catalog.overview()["videos"] == 1
+    assert [row["id"] for row in catalog.videos(10)] == [video_id]
+    assert {row["id"] for row in catalog.pictures_for_year(2020, 10)} == {
+        picture_id,
+        video_id,
+    }
+    catalog.set_rating_policy("5")
+    folder_id = catalog.recent_taken(10)[0]["folder_id"]
+    assert {row["id"] for row in catalog.pictures_in_folder(folder_id, 10)} == {
+        picture_id,
+        video_id,
+    }
+    assert [row["id"] for row in catalog.rated(10)] == [picture_id]
+
+
+def test_random_on_this_day_uses_all_earlier_years_without_duplicates(
+    tmp_path: Path, monkeypatch
+) -> None:
+    catalog = make_catalog(tmp_path)
+    root = tmp_path / "photos"
+    ids = [
+        add_picture(catalog, root, "memory-2018.jpg", "2018-07-17 08:00:00"),
+        add_picture(catalog, root, "memory-2020.jpg", "2020-07-17 09:00:00"),
+        add_picture(catalog, root, "memory-2024.jpg", "2024-07-17 10:00:00"),
+    ]
+    add_picture(catalog, root, "today.jpg", "2026-07-17 11:00:00")
+    add_picture(catalog, root, "other-day.jpg", "2024-07-18 12:00:00")
+
+    with catalog.engine.transaction() as connection:
+        for picture_id, random_key in zip(ids, (0.1, 0.6, 0.9)):
+            catalog.engine.execute(
+                connection,
+                "UPDATE pictures SET random_key=? WHERE id=?",
+                (random_key, picture_id),
+            ).close()
+
+    monkeypatch.setattr("mypicsdb3.db.catalog.random.random", lambda: 0.5)
+    shuffled = []
+
+    def reverse_rows(rows):
+        shuffled.append([row["id"] for row in rows])
+        rows.reverse()
+
+    monkeypatch.setattr("mypicsdb3.db.catalog.random.shuffle", reverse_rows)
+    rows = catalog.random_on_this_day(7, 17, 2026, 10)
+
+    assert shuffled == [[ids[1], ids[2], ids[0]]]
+    assert [row["id"] for row in rows] == [ids[0], ids[2], ids[1]]
+    assert {row["id"] for row in rows} == set(ids)
+    assert len(rows) == len({row["id"] for row in rows})
+    assert catalog.media_type_for_uri(str(root / "memory-2020.jpg")) == "picture"
+    assert catalog.media_type_for_uri(str(root / "missing.jpg")) is None

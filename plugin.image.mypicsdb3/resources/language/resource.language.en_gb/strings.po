@@ -160,12 +160,12 @@ msgid "Never"
 msgstr "Never"
 
 msgctxt "#30038"
-msgid "Indexed pictures"
-msgstr "Indexed pictures"
+msgid "Indexed media"
+msgstr "Indexed media"
 
 msgctxt "#30039"
-msgid "Missing pictures"
-msgstr "Missing pictures"
+msgid "Missing media"
+msgstr "Missing media"
 
 msgctxt "#30040"
 msgid "Indexed albums"
@@ -274,6 +274,14 @@ msgstr "Scan paused during playback"
 msgctxt "#30066"
 msgid "Scan resumed"
 msgstr "Scan resumed"
+
+msgctxt "#30067"
+msgid "Remove missing source?"
+msgstr "Remove missing source?"
+
+msgctxt "#30068"
+msgid "This source is no longer configured in Kodi. Remove it and all of its indexed pictures from MyPicsDB 3?"
+msgstr "This source is no longer configured in Kodi. Remove it and all of its indexed pictures from MyPicsDB 3?"
 
 msgctxt "#32010"
 msgid "General"
@@ -416,8 +424,8 @@ msgid "Controls list sizes and user interface behaviour."
 msgstr "Controls list sizes and user interface behaviour."
 
 msgctxt "#32111"
-msgid "Used when a skin widget URL does not specify a limit."
-msgstr "Used when a skin widget URL does not specify a limit."
+msgid "Number of items loaded in each MyPicsDB 3 home-screen row. Maximum 50."
+msgstr "Number of items loaded in each MyPicsDB 3 home-screen row. Maximum 50."
 
 msgctxt "#32112"
 msgid "Maximum pictures shown on one interactive browser page."
@@ -532,8 +540,8 @@ msgid "Missing files remain visible to the catalogue for this many days before c
 msgstr "Missing files remain visible to the catalogue for this many days before cleanup. Zero removes them immediately when cleanup is run."
 
 msgctxt "#32162"
-msgid "Write detailed scanner information to kodi.log."
-msgstr "Write detailed scanner information to kodi.log."
+msgid "Write detailed add-on diagnostics to kodi.log without requiring Kodi's global debug mode."
+msgstr "Write detailed add-on diagnostics to kodi.log without requiring Kodi's global debug mode."
 
 msgctxt "#32070"
 msgid "Home screen"
@@ -594,3 +602,299 @@ msgstr "Show Kodi picture sources and Picture add-ons above the MyPicsDB 3 rows.
 msgctxt "#32172"
 msgid "Choose the content for this position. Select None to hide the row."
 msgstr "Choose the content for this position. Select None to hide the row."
+
+msgctxt "#32200"
+msgid "Default album view"
+msgstr "Default album view"
+
+msgctxt "#32201"
+msgid "Use skin default"
+msgstr "Use skin default"
+
+msgctxt "#32202"
+msgid "List"
+msgstr "List"
+
+msgctxt "#32203"
+msgid "Icon wall"
+msgstr "Icon wall"
+
+msgctxt "#32204"
+msgid "Shift"
+msgstr "Shift"
+
+msgctxt "#32205"
+msgid "Info wall"
+msgstr "Info wall"
+
+msgctxt "#32206"
+msgid "Wide list"
+msgstr "Wide list"
+
+msgctxt "#32207"
+msgid "Wall"
+msgstr "Wall"
+
+msgctxt "#32208"
+msgid "Configure home-screen rows"
+msgstr "Configure home-screen rows"
+
+msgctxt "#32209"
+msgid "Enable row"
+msgstr "Enable row"
+
+msgctxt "#32210"
+msgid "Disable row"
+msgstr "Disable row"
+
+msgctxt "#32211"
+msgid "Move up"
+msgstr "Move up"
+
+msgctxt "#32212"
+msgid "Move down"
+msgstr "Move down"
+
+msgctxt "#32213"
+msgid "Done"
+msgstr "Done"
+
+msgctxt "#32214"
+msgid "Home-screen layout saved"
+msgstr "Home-screen layout saved"
+
+msgctxt "#32215"
+msgid "Save current view as album default"
+msgstr "Save current view as album default"
+
+msgctxt "#32216"
+msgid "Album default view saved"
+msgstr "Album default view saved"
+
+msgctxt "#32217"
+msgid "Could not detect the current view"
+msgstr "Could not detect the current view"
+
+msgctxt "#32218"
+msgid "Enabled"
+msgstr "Enabled"
+
+msgctxt "#32219"
+msgid "Disabled"
+msgstr "Disabled"
+
+msgctxt "#32300"
+msgid "Choose the view used when an album is opened. The available view IDs match Estuary and Estuary MyPicsDB 3."
+msgstr "Choose the view used when an album is opened. The available view IDs match Estuary and Estuary MyPicsDB 3."
+
+msgctxt "#32301"
+msgid "Open a visual editor where every home-screen row has an On/Off control and Move up/Move down buttons."
+msgstr "Open a visual editor where every home-screen row has an On/Off control and Move up/Move down buttons."
+
+msgctxt "#32220"
+msgid "View"
+msgstr "View"
+
+msgctxt "#32221"
+msgid "Shown"
+msgstr "Shown"
+
+msgctxt "#32222"
+msgid "Order"
+msgstr "Order"
+
+msgctxt "#32223"
+msgid "On"
+msgstr "On"
+
+msgctxt "#32224"
+msgid "Off"
+msgstr "Off"
+
+msgctxt "#32225"
+msgid "Save"
+msgstr "Save"
+
+msgctxt "#32226"
+msgid "Cancel"
+msgstr "Cancel"
+
+msgctxt "#32227"
+msgid "Defaults"
+msgstr "Defaults"
+
+msgctxt "#30069"
+msgid "Minimum rating: %s"
+msgstr "Minimum rating: %s"
+
+msgctxt "#30070"
+msgid "Show all pictures temporarily"
+msgstr "Show all pictures temporarily"
+
+msgctxt "#30071"
+msgid "Use configured rating filter"
+msgstr "Use configured rating filter"
+
+msgctxt "#30072"
+msgid "Temporary: all pictures"
+msgstr "Temporary: all pictures"
+
+msgctxt "#32400"
+msgid "Minimum picture rating"
+msgstr "Minimum picture rating"
+
+msgctxt "#32401"
+msgid "Rated and unrated (exclude rating 0)"
+msgstr "Rated and unrated (exclude rating 0)"
+
+msgctxt "#32402"
+msgid "Rating 1 or higher"
+msgstr "Rating 1 or higher"
+
+msgctxt "#32403"
+msgid "Rating 2 or higher"
+msgstr "Rating 2 or higher"
+
+msgctxt "#32404"
+msgid "Rating 3 or higher"
+msgstr "Rating 3 or higher"
+
+msgctxt "#32405"
+msgid "Rating 4 or higher"
+msgstr "Rating 4 or higher"
+
+msgctxt "#32406"
+msgid "Rating 5"
+msgstr "Rating 5"
+
+msgctxt "#32407"
+msgid "Filters normal picture, album, date, camera, keyword and widget views. Unrated pictures have no stored rating; rating 0 is an explicit zero rating. Scanning and stored metadata are not changed."
+msgstr "Filters normal picture, album, date, camera, keyword and widget views. Unrated pictures have no stored rating; rating 0 is an explicit zero rating. Scanning and stored metadata are not changed."
+
+msgctxt "#32500"
+msgid "Search"
+msgstr "Search"
+
+msgctxt "#32501"
+msgid "Search pictures"
+msgstr "Search pictures"
+
+msgctxt "#32502"
+msgid "Search results: %s"
+msgstr "Search results: %s"
+
+msgctxt "#32503"
+msgid "Invalid search"
+msgstr "Invalid search"
+
+msgctxt "#32228"
+msgid "Configure add-on menu"
+msgstr "Configure add-on menu"
+
+msgctxt "#32229"
+msgid "Add-on menu saved"
+msgstr "Add-on menu saved"
+
+msgctxt "#32302"
+msgid "Choose which browsing nodes are visible in the MyPicsDB 3 add-on menu. Search, picture sources, scanning and settings remain available."
+msgstr "Choose which browsing nodes are visible in the MyPicsDB 3 add-on menu. Search, picture sources, scanning and settings remain available."
+
+msgctxt "#32600"
+msgid "Videos"
+msgstr "Videos"
+
+msgctxt "#32601"
+msgid "Indexed videos"
+msgstr "Indexed videos"
+
+msgctxt "#32602"
+msgid "Play mixed slideshow"
+msgstr "Play mixed slideshow"
+
+msgctxt "#32603"
+msgid "Play slideshow from here"
+msgstr "Play slideshow from here"
+
+msgctxt "#32604"
+msgid "No media to play"
+msgstr "No media to play"
+
+msgctxt "#32605"
+msgid "Could not start slideshow"
+msgstr "Could not start slideshow"
+
+msgctxt "#32606"
+msgid "On this day - random"
+msgstr "On this day - random"
+
+msgctxt "#32610"
+msgid "Include videos"
+msgstr "Include videos"
+
+msgctxt "#32611"
+msgid "Index supported video files alongside pictures. Video metadata is limited to filename, file information and file modification date in this release. Run a new scan after changing this setting."
+msgstr "Index supported video files alongside pictures. Video metadata is limited to filename, file information and file modification date in this release. Run a new scan after changing this setting."
+
+msgctxt "#32612"
+msgid "Video file extensions"
+msgstr "Video file extensions"
+
+msgctxt "#32613"
+msgid "Comma-separated video extensions without leading dots. Used only when Include videos is enabled."
+msgstr "Comma-separated video extensions without leading dots. Used only when Include videos is enabled."
+
+msgctxt "#32614"
+msgid "MyPicsDB 3 is starting. Please try again in a moment."
+msgstr "MyPicsDB 3 is starting. Please try again in a moment."
+
+msgctxt "#32700"
+msgid "Saved searches"
+msgstr "Saved searches"
+
+msgctxt "#32701"
+msgid "Save this search"
+msgstr "Save this search"
+
+msgctxt "#32702"
+msgid "Saved-search name"
+msgstr "Saved-search name"
+
+msgctxt "#32703"
+msgid "Search saved"
+msgstr "Search saved"
+
+msgctxt "#32704"
+msgid "Could not save search"
+msgstr "Could not save search"
+
+msgctxt "#32705"
+msgid "Rename saved search"
+msgstr "Rename saved search"
+
+msgctxt "#32706"
+msgid "Delete saved search"
+msgstr "Delete saved search"
+
+msgctxt "#32707"
+msgid "Saved search renamed"
+msgstr "Saved search renamed"
+
+msgctxt "#32708"
+msgid "Saved search deleted"
+msgstr "Saved search deleted"
+
+msgctxt "#32709"
+msgid "Saved search was not found"
+msgstr "Saved search was not found"
+
+msgctxt "#32710"
+msgid "Invalid saved search"
+msgstr "Invalid saved search"
+
+msgctxt "#32711"
+msgid "Could not rename saved search"
+msgstr "Could not rename saved search"
+
+msgctxt "#32712"
+msgid "Delete '%s'?"
+msgstr "Delete '%s'?"

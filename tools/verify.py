@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import ast
 import hashlib
+import json
 import py_compile
 import tempfile
 import xml.etree.ElementTree as ET
@@ -12,8 +14,6 @@ from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[1]
 STATIC_ADDONS = [ROOT / "plugin.image.mypicsdb3", ROOT / "repository.mypicsdb3"]
-GENERATED_SKIN = ROOT / "build" / "skin.estuary.mypicsdb3"
-
 
 def fail(message: str) -> None:
     raise SystemExit("ERROR: " + message)
@@ -21,14 +21,143 @@ def fail(message: str) -> None:
 
 def addon_dirs(extra_addons: Iterable[Path] = ()) -> list[Path]:
     result = list(STATIC_ADDONS)
-    if GENERATED_SKIN.is_dir() and GENERATED_SKIN not in result:
-        result.append(GENERATED_SKIN)
     for addon in extra_addons:
         addon = Path(addon)
         if addon not in result:
             result.append(addon)
     return result
 
+
+
+def parse_numeric_version(value: str, label: str) -> tuple[int, ...]:
+    parts = value.split(".")
+    if not parts or any(not part.isdigit() for part in parts):
+        fail("%s must be a dotted numeric version, got %r" % (label, value))
+    return tuple(int(part) for part in parts)
+
+
+def read_python_package_version() -> str:
+    init_path = (
+        ROOT
+        / "plugin.image.mypicsdb3"
+        / "resources"
+        / "lib"
+        / "mypicsdb3"
+        / "__init__.py"
+    )
+    module = ast.parse(init_path.read_text(encoding="utf-8"), filename=str(init_path))
+    versions = []
+    for node in module.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        if not any(isinstance(target, ast.Name) and target.id == "VERSION" for target in node.targets):
+            continue
+        if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+            versions.append(node.value.value)
+    if len(versions) != 1:
+        fail("mypicsdb3.__init__ must define VERSION exactly once as a string")
+    return versions[0]
+
+
+def verify_release_versions() -> None:
+    plugin_version = ET.parse(
+        ROOT / "plugin.image.mypicsdb3" / "addon.xml"
+    ).getroot().attrib.get("version", "")
+    repository_version = ET.parse(
+        ROOT / "repository.mypicsdb3" / "addon.xml"
+    ).getroot().attrib.get("version", "")
+    package_version = read_python_package_version()
+
+    plugin_numeric = parse_numeric_version(
+        plugin_version, "plugin.image.mypicsdb3 version"
+    )
+    repository_numeric = parse_numeric_version(
+        repository_version, "repository.mypicsdb3 version"
+    )
+    parse_numeric_version(package_version, "mypicsdb3 package version")
+
+    if plugin_version != package_version:
+        fail(
+            "Plug-in and Python package versions differ: plugin=%s, package=%s"
+            % (plugin_version, package_version)
+        )
+    if repository_numeric > plugin_numeric:
+        fail(
+            "Repository add-on version %s cannot be newer than plug-in version %s"
+            % (repository_version, plugin_version)
+        )
+
+
+def verify_repository_manifest(addon: Path, root: ET.Element) -> None:
+    extension = None
+    for candidate in root.findall("extension"):
+        if candidate.attrib.get("point") == "xbmc.addon.repository":
+            extension = candidate
+            break
+    if extension is None:
+        fail("Missing xbmc.addon.repository extension in %s" % addon.name)
+
+    config_path = ROOT / "contrib" / "estuary" / "upstream.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    channels = list(config.get("channels", {}).items())
+    directories = extension.findall("dir")
+    if len(directories) != len(channels):
+        fail(
+            "%s must declare one repository <dir> per Estuary channel"
+            % addon.name
+        )
+
+    base_url = "https://raffe1234.github.io/mypicsdb3/repository"
+    previous_max: tuple[int, ...] | None = None
+    for directory, (channel_name, channel) in zip(directories, channels):
+        unknown = set(directory.attrib) - {"minversion", "maxversion"}
+        if unknown:
+            fail(
+                "Unsupported attributes on repository channel %s: %s"
+                % (channel_name, ", ".join(sorted(unknown)))
+            )
+
+        minversion = directory.attrib.get("minversion")
+        maxversion = directory.attrib.get("maxversion")
+        if minversion != channel.get("minversion"):
+            fail(
+                "Repository channel %s minversion differs from upstream.json"
+                % channel_name
+            )
+        if maxversion != channel.get("maxversion"):
+            fail(
+                "Repository channel %s maxversion differs from upstream.json"
+                % channel_name
+            )
+
+        minimum = parse_numeric_version(minversion, "%s minversion" % channel_name)
+        maximum = parse_numeric_version(maxversion, "%s maxversion" % channel_name)
+        if minimum > maximum:
+            fail("Repository channel %s has an inverted version range" % channel_name)
+        if previous_max is not None and minimum <= previous_max:
+            fail("Repository channel version ranges overlap at %s" % channel_name)
+        previous_max = maximum
+
+        expected = {
+            "info": "%s/%s/addons.xml" % (base_url, channel_name),
+            "checksum": "%s/%s/addons.xml.md5" % (base_url, channel_name),
+            "datadir": "%s/%s/" % (base_url, channel_name),
+            "hashes": "sha256",
+        }
+        for element_name, expected_value in expected.items():
+            actual = directory.findtext(element_name)
+            if actual != expected_value:
+                fail(
+                    "Repository channel %s has unexpected <%s>: %r"
+                    % (channel_name, element_name, actual)
+                )
+
+        info = directory.find("info")
+        datadir = directory.find("datadir")
+        if info is None or info.attrib.get("compressed") != "false":
+            fail("Repository channel %s must use uncompressed addons.xml" % channel_name)
+        if datadir is None or datadir.attrib.get("zip") != "true":
+            fail("Repository channel %s must serve zipped add-ons" % channel_name)
 
 def verify_addon(addon: Path) -> None:
     if not addon.is_dir():
@@ -62,13 +191,22 @@ def verify_addon(addon: Path) -> None:
     if fanart.size not in {(1280, 720), (1920, 1080), (3840, 2160)}:
         fail("fanart.jpg has an unsupported size")
 
+    if addon.name == "repository.mypicsdb3":
+        verify_repository_manifest(addon, root)
+
     if addon.name == "skin.estuary.mypicsdb3":
         home = addon / "xml" / "Home.xml"
         if not home.is_file():
             fail("Generated skin is missing xml/Home.xml")
         home_text = home.read_text(encoding="utf-8")
-        if "plugin://plugin.image.mypicsdb3/recent-taken?limit=15" not in home_text:
+        if "plugin://plugin.image.mypicsdb3/recent-taken?widget=1" not in home_text:
             fail("Generated skin does not contain the MyPicsDB 3 Pictures widgets")
+        includes_home = addon / "xml" / "Includes_Home.xml"
+        if not includes_home.is_file():
+            fail("Generated skin is missing xml/Includes_Home.xml")
+        includes_home_text = includes_home.read_text(encoding="utf-8")
+        if 'limit="$PARAM[widget_limit]"' not in includes_home_text:
+            fail("Generated skin does not support configurable MyPicsDB widget limits")
         dependencies = {
             node.attrib.get("addon"): node.attrib.get("version")
             for node in root.findall("./requires/import")
@@ -79,7 +217,7 @@ def verify_addon(addon: Path) -> None:
 
 def verify_text_and_xml() -> None:
     for path in ROOT.rglob("*"):
-        if not path.is_file() or any(part in {"dist", ".git", "__pycache__", ".cache"} for part in path.parts):
+        if not path.is_file() or any(part in {"dist", "build", ".git", "__pycache__", ".cache"} for part in path.parts):
             continue
         data = path.read_bytes()
         if path.suffix.lower() in {".xml", ".txt", ".py", ".md", ".po", ".yml", ".yaml", ".json"}:
@@ -109,6 +247,7 @@ def compile_python() -> None:
 
 
 def main(extra_addons: Sequence[Path] = ()) -> int:
+    verify_release_versions()
     for addon in addon_dirs(extra_addons):
         verify_addon(addon)
     verify_text_and_xml()

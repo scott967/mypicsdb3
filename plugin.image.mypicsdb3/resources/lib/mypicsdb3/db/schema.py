@@ -48,6 +48,7 @@ SQLITE_SCHEMA = [
         uri_hash TEXT NOT NULL UNIQUE,
         filename TEXT NOT NULL,
         extension TEXT NOT NULL,
+        media_type TEXT NOT NULL DEFAULT 'picture',
         file_size INTEGER NOT NULL,
         file_mtime REAL NOT NULL,
         discovered_at TEXT NOT NULL,
@@ -92,6 +93,19 @@ SQLITE_SCHEMA = [
         FOREIGN KEY(picture_id) REFERENCES pictures(id) ON DELETE CASCADE,
         FOREIGN KEY(tag_id) REFERENCES tags(id) ON DELETE CASCADE
     )""",
+    """CREATE TABLE IF NOT EXISTS picture_search_documents (
+        picture_id INTEGER PRIMARY KEY,
+        document TEXT NOT NULL,
+        FOREIGN KEY(picture_id) REFERENCES pictures(id) ON DELETE CASCADE
+    )""",
+    """CREATE TABLE IF NOT EXISTS saved_searches (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL UNIQUE,
+        query_version INTEGER NOT NULL,
+        query_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )""",
     """CREATE TABLE IF NOT EXISTS scan_runs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         source_id INTEGER,
@@ -116,9 +130,11 @@ SQLITE_SCHEMA = [
     "CREATE INDEX IF NOT EXISTS idx_pictures_added ON pictures(is_missing, discovered_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_pictures_random ON pictures(is_missing, random_key)",
     "CREATE INDEX IF NOT EXISTS idx_pictures_date_parts ON pictures(is_missing, taken_month, taken_day, taken_year)",
+    "CREATE INDEX IF NOT EXISTS idx_pictures_date_browse ON pictures(is_missing, taken_year, taken_month, taken_day, taken_at)",
     "CREATE INDEX IF NOT EXISTS idx_pictures_folder ON pictures(folder_id, is_missing)",
     "CREATE INDEX IF NOT EXISTS idx_pictures_camera ON pictures(is_missing, camera_make, camera_model)",
     "CREATE INDEX IF NOT EXISTS idx_pictures_favorite ON pictures(is_missing, favorite)",
+    "CREATE INDEX IF NOT EXISTS idx_pictures_media_type ON pictures(is_missing, media_type, taken_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_folders_parent ON folders(source_id, parent_uri, is_missing)",
     "CREATE INDEX IF NOT EXISTS idx_folders_recent ON folders(is_missing, latest_discovered_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_folders_random ON folders(is_missing, random_key)",
@@ -167,6 +183,7 @@ MYSQL_SCHEMA = [
         uri_hash CHAR(64) NOT NULL UNIQUE,
         filename VARCHAR(1024) NOT NULL,
         extension VARCHAR(32) NOT NULL,
+        media_type VARCHAR(16) NOT NULL DEFAULT 'picture',
         file_size BIGINT NOT NULL,
         file_mtime DOUBLE NOT NULL,
         discovered_at DATETIME(6) NOT NULL,
@@ -202,9 +219,11 @@ MYSQL_SCHEMA = [
         INDEX idx_pictures_added (is_missing, discovered_at),
         INDEX idx_pictures_random (is_missing, random_key),
         INDEX idx_pictures_date_parts (is_missing, taken_month, taken_day, taken_year),
+        INDEX idx_pictures_date_browse (is_missing, taken_year, taken_month, taken_day, taken_at),
         INDEX idx_pictures_folder (folder_id, is_missing),
         INDEX idx_pictures_camera (is_missing, camera_make, camera_model),
-        INDEX idx_pictures_favorite (is_missing, favorite)
+        INDEX idx_pictures_favorite (is_missing, favorite),
+        INDEX idx_pictures_media_type (is_missing, media_type, taken_at)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin""",
     """CREATE TABLE IF NOT EXISTS tags (
         id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
@@ -217,6 +236,20 @@ MYSQL_SCHEMA = [
         PRIMARY KEY(picture_id, tag_id),
         CONSTRAINT fk_picture_tags_picture FOREIGN KEY(picture_id) REFERENCES pictures(id) ON DELETE CASCADE,
         CONSTRAINT fk_picture_tags_tag FOREIGN KEY(tag_id) REFERENCES tags(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin""",
+    """CREATE TABLE IF NOT EXISTS picture_search_documents (
+        picture_id BIGINT UNSIGNED NOT NULL PRIMARY KEY,
+        document TEXT NOT NULL,
+        CONSTRAINT fk_picture_search_documents_picture
+            FOREIGN KEY(picture_id) REFERENCES pictures(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin""",
+    """CREATE TABLE IF NOT EXISTS saved_searches (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+        name VARCHAR(191) NOT NULL UNIQUE,
+        query_version INT NOT NULL,
+        query_json LONGTEXT NOT NULL,
+        created_at DATETIME(6) NOT NULL,
+        updated_at DATETIME(6) NOT NULL
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin""",
     """CREATE TABLE IF NOT EXISTS scan_runs (
         id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
@@ -244,7 +277,13 @@ MYSQL_SCHEMA = [
 ]
 
 
-def initialise_schema(engine, connection) -> None:
+def create_schema(engine, connection) -> None:
+    """Create the current schema objects without deciding migration policy.
+
+    Version checks, backups and migration history belong to MigrationRunner.
+    Keeping this function deterministic also makes fresh-database creation and
+    schema inspection straightforward.
+    """
     statements: List[str] = MYSQL_SCHEMA if engine.backend == "mysql" else SQLITE_SCHEMA
     for statement in statements:
         try:
@@ -256,10 +295,25 @@ def initialise_schema(engine, connection) -> None:
             if engine.backend == "mysql" and ("duplicate key name" in message or "already exists" in message):
                 continue
             raise
-    row = engine.fetchone(connection, "SELECT value FROM meta WHERE `key`=?" if engine.backend == "mysql" else "SELECT value FROM meta WHERE key=?", ("schema_version",))
+
+
+def initialise_schema(engine, connection) -> None:
+    """Compatibility wrapper for callers that still initialise a fresh schema.
+
+    Production startup uses MigrationRunner so existing databases are backed up
+    and version-checked before any structural change.
+    """
+    create_schema(engine, connection)
+    row = engine.fetchone(
+        connection,
+        "SELECT value FROM meta WHERE `key`=?" if engine.backend == "mysql" else "SELECT value FROM meta WHERE key=?",
+        ("schema_version",),
+    )
     if row is None:
-        engine.execute(connection, "INSERT INTO meta (`key`, value) VALUES (?, ?)" if engine.backend == "mysql" else "INSERT INTO meta (key, value) VALUES (?, ?)", ("schema_version", str(SCHEMA_VERSION))).close()
-    elif int(row["value"]) > SCHEMA_VERSION:
-        raise RuntimeError("The database schema is newer than this add-on")
-    elif int(row["value"]) < SCHEMA_VERSION:
-        raise RuntimeError("A database migration is required but is not implemented")
+        engine.execute(
+            connection,
+            "INSERT INTO meta (`key`, value) VALUES (?, ?)" if engine.backend == "mysql" else "INSERT INTO meta (key, value) VALUES (?, ?)",
+            ("schema_version", str(SCHEMA_VERSION)),
+        ).close()
+    elif int(row["value"]) != SCHEMA_VERSION:
+        raise RuntimeError("Use MigrationRunner for an existing database schema")
