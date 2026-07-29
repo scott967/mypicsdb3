@@ -11,6 +11,8 @@ from .filesystem import Filesystem
 from .models import MetadataResult
 from .utils import decode_text, stable_json_hash, unique_strings
 
+#import xbmc
+
 try:
     import exifread  # type: ignore
 except ImportError:  # pragma: no cover
@@ -261,21 +263,24 @@ def _read_iptc(path: str) -> Dict[str, Any]:
         return {}
     try:
         info = IPTCInfo(path, force=True)
+        #xbmc.log(f"IPTCInfo read for {path} and type {type(info)}: {info}", level=xbmc.LOGDEBUG)
     except Exception:
+        #xbmc.log(f"IPTCInfo failed to read {path}", level=xbmc.LOGDEBUG)
         return {}
-    keywords = info.get("keywords") or []
+    #xbmc.log(f"IPTCInfo keywords for {path}: {info["keywords"]}", level=xbmc.LOGDEBUG)
+    keywords = info["keywords"] if "keywords" in info else []
     if not isinstance(keywords, (list, tuple)):
         keywords = [keywords]
     location = {}
     for output, iptc_key in (("city", "city"), ("state", "province/state"), ("country", "country/primary location name"), ("sublocation", "sub-location")):
-        value = decode_text(info.get(iptc_key))
+        value = decode_text(info[iptc_key]) if iptc_key in info else None
         if value:
             location[output] = value
     return {
         "keywords": unique_strings(keywords),
         "location": location,
-        "caption": decode_text(info.get("caption/abstract")) or None,
-        "date_created": _normalise_date(info.get("date created")),
+        "caption": decode_text(info["caption/abstract"]) if "caption/abstract" in info else None,
+        "date_created": _normalise_date(info["date created"]) if "date created" in info else None,
     }
 
 
