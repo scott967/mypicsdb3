@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import time
+import uuid
 from datetime import date
 from typing import Callable
 
 from .db import Catalog, DatabaseEngine
 from .db.migrations import MigrationLockError
 from .filesystem import KodiFilesystem
-from .scanner import Scanner
+from .scanner import ScanAlreadyRunning, Scanner
 
 
 DATE_REFRESH_DELAY_SECONDS = 60.0
@@ -93,8 +94,7 @@ class MixedSlideshowVideoMonitor:
                     {"playerid": by_type["picture"], "to": "next"},
                 )
                 self.kodi.log.info(
-                    "Advanced mixed slideshow after video finished: %s",
-                    self.active_video_uri,
+                    "Advanced mixed slideshow after indexed video finished"
                 )
                 self.active_video_uri = ""
         except Exception as exc:
@@ -198,6 +198,13 @@ class ServiceLoop:
         if runtime_parts is None:
             return
         settings, catalog, filesystem = runtime_parts
+        previous_home_widget_limit = int(
+            getattr(settings, "home_widget_limit", 10)
+        )
+        self.kodi.log.info(
+            "Home-screen widget limit loaded: %d",
+            previous_home_widget_limit,
+        )
         if self._abort_requested():
             return
         try:
@@ -215,12 +222,169 @@ class ServiceLoop:
             if now >= next_maintenance_at:
                 self._refresh_after_date_change()
                 settings = self.kodi.refresh_settings()
+                current_home_widget_limit = int(
+                    getattr(settings, "home_widget_limit", 10)
+                )
+                if current_home_widget_limit != previous_home_widget_limit:
+                    old_home_widget_limit = previous_home_widget_limit
+                    previous_home_widget_limit = current_home_widget_limit
+                    self.kodi.log.info(
+                        "Home-screen widget limit changed: %d -> %d",
+                        old_home_widget_limit,
+                        current_home_widget_limit,
+                    )
+                    invalidator = getattr(
+                        self.kodi, "invalidate_home_widgets", None
+                    )
+                    if callable(invalidator):
+                        try:
+                            invalidator("home widget limit changed")
+                        except Exception as exc:
+                            self.kodi.log.warning(
+                                "Could not refresh home widgets after setting change: %s",
+                                exc,
+                            )
                 if self._abort_requested():
                     break
                 if settings.auto_scan and now >= self.next_scan_at:
                     if not (settings.pause_during_playback and self.kodi.is_playing()):
                         if self._abort_requested():
                             break
+                        scan_token = uuid.uuid4().hex
+                        scan_started = False
+                        progress_dialog = None
+                        last_progress_at = 0.0
+                        user_cancelled = False
+                        playback_paused = False
+
+                        def close_progress_dialog() -> None:
+                            nonlocal progress_dialog
+                            if progress_dialog is None:
+                                return
+                            try:
+                                progress_dialog.close()
+                            except Exception:
+                                pass
+                            progress_dialog = None
+
+                        def ensure_progress_dialog():
+                            nonlocal progress_dialog
+                            if self._abort_requested() or self.kodi.is_playing():
+                                close_progress_dialog()
+                                return None
+                            if progress_dialog is not None:
+                                return progress_dialog
+                            creator = getattr(
+                                self.kodi,
+                                "create_background_progress",
+                                None,
+                            )
+                            if callable(creator):
+                                progress_dialog = creator(
+                                    self.kodi.localize(30056, "MyPicsDB 3"),
+                                    self.kodi.localize(32731, "Automatic scan"),
+                                )
+                            return progress_dialog
+
+                        def begin_status(_stats) -> None:
+                            nonlocal scan_started
+                            scan_started = True
+                            publisher = getattr(self.kodi, "begin_scan_status", None)
+                            if callable(publisher):
+                                publisher(scan_token, "automatic")
+                            ensure_progress_dialog()
+
+                        def scan_cancelled() -> bool:
+                            nonlocal user_cancelled, playback_paused
+
+                            def soft_cancelled() -> bool:
+                                nonlocal user_cancelled
+                                requested = getattr(
+                                    self.kodi,
+                                    "scan_cancel_requested",
+                                    None,
+                                )
+                                user_cancelled = bool(
+                                    callable(requested) and requested(scan_token)
+                                )
+                                return user_cancelled
+
+                            if self._abort_requested() or soft_cancelled():
+                                close_progress_dialog()
+                                return True
+
+                            while (
+                                settings.pause_during_playback
+                                and self.kodi.is_playing()
+                                and not self._abort_requested()
+                                and not soft_cancelled()
+                            ):
+                                close_progress_dialog()
+                                if not playback_paused:
+                                    playback_paused = True
+                                    self.kodi.log.info(
+                                        "Automatic scan paused during playback"
+                                    )
+                                if self.monitor.waitForAbort(1):
+                                    return True
+
+                            if self._abort_requested() or soft_cancelled():
+                                close_progress_dialog()
+                                return True
+
+                            if playback_paused:
+                                playback_paused = False
+                                self.kodi.log.info(
+                                    "Automatic scan resumed after playback"
+                                )
+
+                            if self.kodi.is_playing():
+                                close_progress_dialog()
+                            elif scan_started:
+                                ensure_progress_dialog()
+                            return False
+
+                        def scan_progress(source, path, stats) -> None:
+                            nonlocal last_progress_at
+                            progress_now = self.monotonic_provider()
+                            if (
+                                progress_now - last_progress_at < 0.5
+                                and int(stats.pictures_seen or 0) % 100
+                            ):
+                                return
+                            last_progress_at = progress_now
+                            publisher = getattr(
+                                self.kodi,
+                                "update_scan_status",
+                                None,
+                            )
+                            if callable(publisher):
+                                publisher(
+                                    scan_token,
+                                    source.label,
+                                    path,
+                                    stats.pictures_seen,
+                                )
+                            dialog = ensure_progress_dialog()
+                            if dialog is not None:
+                                message = "%s\n%s\n%s: %d" % (
+                                    source.label,
+                                    path,
+                                    self.kodi.localize(30047, "Pictures found"),
+                                    stats.pictures_seen,
+                                )
+                                try:
+                                    dialog.update(
+                                        0,
+                                        self.kodi.localize(30056, "MyPicsDB 3"),
+                                        message,
+                                    )
+                                except Exception as exc:
+                                    if not self._abort_requested():
+                                        self.kodi.log.warning(
+                                            "Automatic scan progress update failed: %s",
+                                            exc,
+                                        )
                         try:
                             engine = DatabaseEngine(settings, self.kodi.log)
                             catalog = Catalog(engine, self.kodi.log)
@@ -231,19 +395,67 @@ class ServiceLoop:
                                 filesystem,
                                 settings,
                                 self.kodi.log,
-                                cancelled=self._abort_requested,
+                                cancelled=scan_cancelled,
+                                progress=scan_progress,
+                                started=begin_status,
                             )
                             stats = scanner.scan_sources()
+                            if (
+                                int(getattr(stats, "pictures_added", 0) or 0)
+                                + int(getattr(stats, "pictures_updated", 0) or 0)
+                                + int(getattr(stats, "missing_marked", 0) or 0)
+                                > 0
+                            ):
+                                invalidator = getattr(
+                                    self.kodi, "invalidate_home_widgets", None
+                                )
+                                if callable(invalidator):
+                                    try:
+                                        invalidator("automatic scan changed pictures")
+                                    except Exception as exc:
+                                        self.kodi.log.warning(
+                                            "Could not refresh home widgets after automatic scan: %s",
+                                            exc,
+                                        )
                             if stats.cancelled:
-                                self.kodi.log.info("Automatic scan cancelled")
+                                if user_cancelled:
+                                    self.kodi.log.info(
+                                        "Automatic scan cancelled by user"
+                                    )
+                                elif self._abort_requested():
+                                    self.kodi.log.info(
+                                        "Automatic scan interrupted because Kodi or the add-on service stopped"
+                                    )
+                                else:
+                                    self.kodi.log.info("Automatic scan cancelled")
                             else:
                                 self.kodi.log.info(
                                     "Automatic scan finished: %d pictures, %d errors",
                                     stats.pictures_seen,
                                     stats.errors,
                                 )
+                        except ScanAlreadyRunning:
+                            self.kodi.log.info(
+                                "Automatic scan skipped: another scan is already running"
+                            )
                         except Exception as exc:
                             self.kodi.log.error("Automatic scan failed: %s", exc)
+                        finally:
+                            close_progress_dialog()
+                            if scan_started:
+                                finisher = getattr(
+                                    self.kodi,
+                                    "finish_scan_status",
+                                    None,
+                                )
+                                if callable(finisher):
+                                    try:
+                                        finisher(scan_token)
+                                    except Exception as exc:
+                                        self.kodi.log.warning(
+                                            "Could not clear automatic scan status: %s",
+                                            exc,
+                                        )
                         if self._abort_requested():
                             break
                         self.next_scan_at = (

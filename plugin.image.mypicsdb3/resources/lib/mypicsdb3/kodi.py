@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 import os
+import time
+import uuid
 from typing import Any, Dict, List, Optional
 
-from .config import Settings, from_getter
+from .config import Settings, from_getter, resolve_home_widget_limit
 from .log import Logger
-from .utils import is_indexable_picture_source_uri, normalize_uri
+from .utils import is_indexable_picture_source_uri, normalize_uri, parse_bool
 
 try:
     import xbmc  # type: ignore
@@ -20,6 +22,45 @@ except ImportError:  # pragma: no cover - Kodi modules are unavailable in unit t
 SHUTDOWN_NOTIFICATION_METHODS = frozenset(("System.OnQuit", "System.OnRestart"))
 HOME_WINDOW_ID = 10000
 MIXED_SLIDESHOW_PROPERTY = "MyPicsDB3.MixedSlideshowActive"
+PICTURE_PLAYLIST_COMPATIBILITY_PROPERTY = "MyPicsDB3.PicturePlaylistCompatibilityV2"
+SLIDESHOW_START_PROPERTY = "MyPicsDB3.SlideshowStart"
+SLIDESHOW_START_TTL_SECONDS = 180.0
+SCAN_STATUS_PROPERTY = "MyPicsDB3.ScanStatusV1"
+SCAN_CANCEL_PROPERTY = "MyPicsDB3.ScanCancelV1"
+HOME_WIDGET_GENERATION_PROPERTY = "MyPicsDB3.HomeWidgetGeneration"
+HOME_WIDGET_LIMIT_PROPERTY = "MyPicsDB3.HomeWidgetLimit"
+
+INTEGER_SETTING_IDS = frozenset(
+    {
+        "widget_limit",
+        "home_widget_limit",
+        "browser_page_size",
+        "album_view_mode",
+        "scan_interval_hours",
+        "startup_delay_seconds",
+        "batch_size",
+        "metadata_prefix_mb",
+        "deep_metadata_max_mb",
+        "mysql_port",
+        "mysql_connect_timeout",
+        "missing_retention_days",
+    }
+)
+BOOLEAN_SETTING_IDS = frozenset(
+    {
+        "show_notifications",
+        "auto_scan",
+        "pause_during_playback",
+        "include_videos",
+        "exclude_hidden",
+        "read_xmp",
+        "read_iptc",
+        "store_gps",
+        "mysql_auto_create",
+        "debug_logging",
+        "home_widget_limit_migrated_v2",
+    }
+)
 
 
 def create_abort_monitor(xbmc_module=None):
@@ -65,8 +106,20 @@ class KodiContext:
         self.profile_path = self.translate(self.addon.getAddonInfo("profile"))
         if xbmcvfs and not xbmcvfs.exists(self.profile_path):
             xbmcvfs.mkdirs(self.profile_path)
+        migration = self._migrate_home_widget_limit_setting()
         self.settings = self.load_settings()
         self.log = Logger(self.name, self.settings.debug_logging, xbmc)
+        if migration is not None:
+            old_widget, old_home, effective, saved = migration
+            self.log.info(
+                "Home-screen row-count migration: widget_limit=%d, "
+                "home_widget_limit=%d, effective=%d, saved=%s",
+                old_widget,
+                old_home,
+                effective,
+                str(bool(saved)).lower(),
+            )
+        self.publish_home_widget_limit()
 
     @staticmethod
     def translate(path: str) -> str:
@@ -76,12 +129,99 @@ class KodiContext:
             return xbmc.translatePath(path)
         return path
 
+    def _set_integer_setting(self, setting_id: str, value: int) -> bool:
+        get_settings = getattr(self.addon, "getSettings", None)
+        if callable(get_settings):
+            try:
+                get_settings().setInt(setting_id, int(value))
+                return True
+            except Exception:
+                pass
+        typed_setter = getattr(self.addon, "setSettingInt", None)
+        if callable(typed_setter):
+            try:
+                return bool(typed_setter(setting_id, int(value)))
+            except Exception:
+                pass
+        try:
+            result = self.addon.setSetting(setting_id, str(int(value)))
+            return True if result is None else bool(result)
+        except Exception:
+            return False
+
+    def _set_boolean_setting(self, setting_id: str, value: bool) -> bool:
+        get_settings = getattr(self.addon, "getSettings", None)
+        if callable(get_settings):
+            try:
+                get_settings().setBool(setting_id, bool(value))
+                return True
+            except Exception:
+                pass
+        typed_setter = getattr(self.addon, "setSettingBool", None)
+        if callable(typed_setter):
+            try:
+                return bool(typed_setter(setting_id, bool(value)))
+            except Exception:
+                pass
+        try:
+            result = self.addon.setSetting(
+                setting_id, "true" if value else "false"
+            )
+            return True if result is None else bool(result)
+        except Exception:
+            return False
+
+    def _migrate_home_widget_limit_setting(self):
+        getter = self._setting_getter()
+        migration_complete = parse_bool(
+            getter("home_widget_limit_migrated_v2"), False
+        )
+        if migration_complete:
+            return None
+        old_widget = int(
+            resolve_home_widget_limit(getter("widget_limit"), 10, True)
+        )
+        try:
+            old_home = max(4, min(40, int(getter("home_widget_limit"))))
+        except (TypeError, ValueError):
+            old_home = 10
+        effective = resolve_home_widget_limit(old_widget, old_home, False)
+        saved = (
+            self._set_integer_setting("widget_limit", effective)
+            and self._set_integer_setting("home_widget_limit", effective)
+            and self._set_boolean_setting("home_widget_limit_migrated_v2", True)
+        )
+        return old_widget, old_home, effective, saved
+
+    def _setting_getter(self):
+        legacy_getter = self.addon.getSetting
+        get_settings = getattr(self.addon, "getSettings", None)
+        if not callable(get_settings):
+            return legacy_getter
+        try:
+            settings_api = get_settings()
+        except Exception:
+            return legacy_getter
+
+        def getter(setting_id: str):
+            try:
+                if setting_id in INTEGER_SETTING_IDS:
+                    return settings_api.getInt(setting_id)
+                if setting_id in BOOLEAN_SETTING_IDS:
+                    return settings_api.getBool(setting_id)
+                return settings_api.getString(setting_id)
+            except Exception:
+                return legacy_getter(setting_id)
+
+        return getter
+
     def load_settings(self) -> Settings:
-        return from_getter(self.addon.getSetting, self.profile_path)
+        return from_getter(self._setting_getter(), self.profile_path)
 
     def refresh_settings(self) -> Settings:
         self.settings = self.load_settings()
         self.log.debug_enabled = self.settings.debug_logging
+        self.publish_home_widget_limit()
         return self.settings
 
     def localize(self, string_id: int, fallback: str = "") -> str:
@@ -101,7 +241,190 @@ class KodiContext:
         ):
             return
         icon = xbmcgui.NOTIFICATION_ERROR if error else xbmcgui.NOTIFICATION_INFO
-        xbmcgui.Dialog().notification(self.name, message, icon, milliseconds)
+        try:
+            xbmcgui.Dialog().notification(self.name, message, icon, milliseconds)
+        except Exception as exc:
+            self.log.warning("Could not show notification: %s", exc)
+
+    @staticmethod
+    def _home_window():
+        if xbmcgui is None:
+            return None
+        try:
+            return xbmcgui.Window(HOME_WINDOW_ID)
+        except Exception:
+            return None
+
+    def scan_status(self) -> Dict[str, Any]:
+        """Return the current cross-interpreter scan state.
+
+        Kodi runs the plug-in actions and the background service in separate
+        Python interpreters. A Home-window property is therefore used as a
+        lightweight session-local hand-off for menu state, progress and soft
+        cancellation requests.
+        """
+
+        window = self._home_window()
+        if window is None:
+            return {}
+        try:
+            raw = str(window.getProperty(SCAN_STATUS_PROPERTY) or "")
+            value = json.loads(raw) if raw else {}
+        except Exception:
+            return {}
+        if not isinstance(value, dict) or not str(value.get("token") or ""):
+            return {}
+        return value
+
+    def begin_scan_status(self, token: str, kind: str) -> None:
+        window = self._home_window()
+        if window is None:
+            return
+        value = {
+            "token": str(token),
+            "kind": str(kind or "manual"),
+            "state": "running",
+            "pictures_seen": 0,
+            "source": "",
+            "path": "",
+            "started_at": time.time(),
+        }
+        try:
+            window.clearProperty(SCAN_CANCEL_PROPERTY)
+            window.setProperty(
+                SCAN_STATUS_PROPERTY,
+                json.dumps(value, ensure_ascii=False, separators=(",", ":")),
+            )
+        except Exception as exc:
+            self.log.warning("Could not publish scan start: %s", exc)
+
+    def update_scan_status(
+        self,
+        token: str,
+        source: str,
+        path: str,
+        pictures_seen: int,
+    ) -> None:
+        window = self._home_window()
+        if window is None:
+            return
+        current = self.scan_status()
+        if str(current.get("token") or "") != str(token):
+            return
+        current.update(
+            {
+                "source": str(source or ""),
+                "path": str(path or ""),
+                "pictures_seen": max(0, int(pictures_seen or 0)),
+            }
+        )
+        try:
+            window.setProperty(
+                SCAN_STATUS_PROPERTY,
+                json.dumps(current, ensure_ascii=False, separators=(",", ":")),
+            )
+        except Exception as exc:
+            self.log.warning("Could not publish scan progress: %s", exc)
+
+    def scan_cancel_requested(self, token: str) -> bool:
+        window = self._home_window()
+        if window is None:
+            return False
+        try:
+            return str(window.getProperty(SCAN_CANCEL_PROPERTY) or "") == str(token)
+        except Exception:
+            return False
+
+    def request_scan_cancel(self) -> bool:
+        window = self._home_window()
+        if window is None:
+            return False
+        current = self.scan_status()
+        token = str(current.get("token") or "")
+        if not token:
+            return False
+        current["state"] = "cancelling"
+        try:
+            window.setProperty(SCAN_CANCEL_PROPERTY, token)
+            window.setProperty(
+                SCAN_STATUS_PROPERTY,
+                json.dumps(current, ensure_ascii=False, separators=(",", ":")),
+            )
+            return True
+        except Exception as exc:
+            self.log.warning("Could not request scan cancellation: %s", exc)
+            return False
+
+    def finish_scan_status(self, token: str) -> None:
+        window = self._home_window()
+        if window is None:
+            return
+        try:
+            current = self.scan_status()
+            if str(current.get("token") or "") == str(token):
+                window.clearProperty(SCAN_STATUS_PROPERTY)
+            if str(window.getProperty(SCAN_CANCEL_PROPERTY) or "") == str(token):
+                window.clearProperty(SCAN_CANCEL_PROPERTY)
+        except Exception as exc:
+            self.log.warning("Could not clear scan status: %s", exc)
+
+    def publish_home_widget_limit(self) -> int:
+        settings = getattr(self, "settings", None)
+        limit = max(4, min(40, int(getattr(settings, "home_widget_limit", 10))))
+        window = self._home_window()
+        if window is None:
+            return limit
+        try:
+            window.setProperty(HOME_WIDGET_LIMIT_PROPERTY, str(limit))
+        except Exception as exc:
+            logger = getattr(self, "log", None)
+            if logger is not None:
+                logger.warning("Could not publish home-screen widget limit: %s", exc)
+        return limit
+
+    def invalidate_home_widgets(self, reason: str = "") -> int:
+        """Change the home content-provider URL without reloading the skin.
+
+        The Estuary integration includes this Home-window generation value in
+        every MyPicsDB 3 widget URL. Updating it makes Kodi request fresh
+        database results while preserving the rest of the home screen and its
+        texture cache.
+        """
+
+        self.publish_home_widget_limit()
+        window = self._home_window()
+        if window is None:
+            return 0
+        try:
+            current = int(
+                str(window.getProperty(HOME_WIDGET_GENERATION_PROPERTY) or "0")
+            )
+        except (TypeError, ValueError):
+            current = 0
+        generation = 1 if current >= 2147483646 else current + 1
+        try:
+            window.setProperty(HOME_WIDGET_GENERATION_PROPERTY, str(generation))
+            if reason:
+                self.log.debug(
+                    "Home-screen widgets invalidated (%s), generation=%d",
+                    reason,
+                    generation,
+                )
+            return generation
+        except Exception as exc:
+            self.log.warning("Could not invalidate home-screen widgets: %s", exc)
+            return current
+
+    def create_background_progress(self, heading: str, message: str):
+        if xbmcgui is None:
+            return None
+        try:
+            dialog = xbmcgui.DialogProgressBG()
+            dialog.create(heading, message)
+            return dialog
+        except Exception as exc:
+            self.log.warning("Could not create background progress dialog: %s", exc)
+            return None
 
     def execute_jsonrpc(self, method: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         request = {"jsonrpc": "2.0", "id": 1, "method": method}
@@ -125,13 +448,32 @@ class KodiContext:
         self.addon.openSettings()
 
     @staticmethod
-    def refresh_date_sensitive_views() -> bool:
-        """Refresh views whose contents depend on the local calendar date.
+    def refresh_random_views() -> None:
+        """Request fresh random plug-in results and home-screen widgets.
 
-        The custom Estuary home rows are cached until the skin is rebuilt.
-        Reloading a skin while Kodi is scanning, playing media, displaying a
-        modal dialog or running a screen saver can destabilize the GUI, so the
-        background service must defer and retry until the home window is idle.
+        Random routes are database-only and are deliberately not persisted.
+        Refresh the active plug-in container, then reload the optional Estuary
+        fork so its content-provider rows invoke those routes again.
+        """
+
+        if xbmc is None:
+            return
+        xbmc.executebuiltin("Container.Refresh")
+        skin_id = xbmc.getSkinDir() if hasattr(xbmc, "getSkinDir") else ""
+        if skin_id == "skin.estuary.mypicsdb3":
+            # Estuary remembers one horizontal widget position globally. A
+            # fresh random result set can otherwise reopen with its first item
+            # mostly outside the viewport, which looks like an empty tile.
+            xbmc.executebuiltin("ClearProperty(listposition,home)")
+            xbmc.executebuiltin("ReloadSkin()")
+
+    @staticmethod
+    def refresh_date_sensitive_views() -> bool:
+        """Request a lightweight refresh for local-date-dependent views.
+
+        A full ``ReloadSkin`` invalidates every home widget and makes Kodi
+        recreate network and RAW artwork. The service now refreshes only the
+        active container after the GUI becomes idle.
         """
         if xbmc is None:
             return True
@@ -143,6 +485,24 @@ class KodiContext:
         )
         skin_id = xbmc.getSkinDir() if hasattr(xbmc, "getSkinDir") else ""
         if skin_id != "skin.estuary.mypicsdb3":
+            folder_path = (
+                str(xbmc.getInfoLabel("Container.FolderPath") or "")
+                if hasattr(xbmc, "getInfoLabel")
+                else ""
+            )
+            if current_window != 10002 or not folder_path.startswith(
+                "plugin://plugin.image.mypicsdb3"
+            ):
+                return True
+            if hasattr(xbmc, "getCondVisibility") and any(
+                xbmc.getCondVisibility(condition)
+                for condition in (
+                    "Container.IsUpdating",
+                    "Player.HasMedia",
+                    "System.HasActiveModalDialog",
+                )
+            ):
+                return False
             xbmc.executebuiltin("Container.Refresh")
             return True
 
@@ -151,6 +511,7 @@ class KodiContext:
 
         if hasattr(xbmc, "getCondVisibility"):
             unsafe_conditions = (
+                "Container.IsUpdating",
                 "Library.IsScanning",
                 "Player.HasMedia",
                 "System.HasActiveModalDialog",
@@ -160,8 +521,61 @@ class KodiContext:
             if any(xbmc.getCondVisibility(condition) for condition in unsafe_conditions):
                 return False
 
-        xbmc.executebuiltin("ReloadSkin()")
+        xbmc.executebuiltin("Container.Refresh")
         return True
+
+    def acquire_slideshow_start(self) -> Optional[str]:
+        """Acquire a short session-local guard for playlist construction.
+
+        Kodi may launch multiple plug-in interpreter instances when slideshow
+        actions are selected repeatedly. Without a guard, those instances can
+        clear and append to the same global Kodi playlists concurrently.
+        """
+
+        if xbmcgui is None:
+            return uuid.uuid4().hex
+        try:
+            window = xbmcgui.Window(HOME_WINDOW_ID)
+            now = time.time()
+            current = str(window.getProperty(SLIDESHOW_START_PROPERTY) or "")
+            if current:
+                _token, _separator, timestamp = current.partition("|")
+                try:
+                    age = now - float(timestamp)
+                except (TypeError, ValueError):
+                    age = SLIDESHOW_START_TTL_SECONDS + 1.0
+                if 0.0 <= age < SLIDESHOW_START_TTL_SECONDS:
+                    self.log.info(
+                        "Slideshow start ignored: another slideshow is being prepared"
+                    )
+                    return None
+
+            token = uuid.uuid4().hex
+            value = "%s|%.6f" % (token, now)
+            window.setProperty(SLIDESHOW_START_PROPERTY, value)
+            if str(window.getProperty(SLIDESHOW_START_PROPERTY) or "") != value:
+                self.log.info(
+                    "Slideshow start ignored: another slideshow acquired the guard"
+                )
+                return None
+            self.log.debug("Slideshow start guard acquired")
+            return token
+        except Exception as exc:
+            self.log.warning("Could not acquire slideshow start guard: %s", exc)
+            return uuid.uuid4().hex
+
+    def release_slideshow_start(self, token: str) -> None:
+        if xbmcgui is None:
+            return
+        try:
+            window = xbmcgui.Window(HOME_WINDOW_ID)
+            current = str(window.getProperty(SLIDESHOW_START_PROPERTY) or "")
+            current_token, _separator, _timestamp = current.partition("|")
+            if current_token == str(token or ""):
+                window.clearProperty(SLIDESHOW_START_PROPERTY)
+                self.log.debug("Slideshow start guard released")
+        except Exception as exc:
+            self.log.warning("Could not release slideshow start guard: %s", exc)
 
     def set_mixed_slideshow_active(self, active: bool) -> None:
         """Publish whether MyPicsDB owns the current database slideshow.
@@ -198,15 +612,66 @@ class KodiContext:
         except Exception:
             return False
 
+    def set_picture_playlist_compatibility(self, compatible: Optional[bool]) -> None:
+        """Cache picture-playlist support for the current Kodi session."""
+
+        if xbmcgui is None:
+            return
+        try:
+            window = xbmcgui.Window(HOME_WINDOW_ID)
+            if compatible is None:
+                window.clearProperty(PICTURE_PLAYLIST_COMPATIBILITY_PROPERTY)
+                value = "unknown"
+            else:
+                value = "compatible" if compatible else "incompatible"
+                window.setProperty(PICTURE_PLAYLIST_COMPATIBILITY_PROPERTY, value)
+            self.log.debug("Picture playlist compatibility: %s", value)
+        except Exception as exc:
+            self.log.warning(
+                "Could not update picture playlist compatibility: %s", exc
+            )
+
+    @staticmethod
+    def picture_playlist_compatibility() -> Optional[bool]:
+        if xbmcgui is None:
+            return None
+        try:
+            value = str(
+                xbmcgui.Window(HOME_WINDOW_ID).getProperty(
+                    PICTURE_PLAYLIST_COMPATIBILITY_PROPERTY
+                )
+                or ""
+            ).strip().lower()
+        except Exception:
+            return None
+        if value == "compatible":
+            return True
+        if value == "incompatible":
+            return False
+        return None
+
     @staticmethod
     def is_playing() -> bool:
-        return bool(xbmc and xbmc.Player().isPlaying())
+        if xbmc is None:
+            return False
+        try:
+            return bool(xbmc.Player().isPlaying())
+        except Exception:
+            return False
 
     @staticmethod
     def playing_file() -> str:
         if xbmc is None:
             return ""
         try:
+            if hasattr(xbmc, "getCondVisibility") and not xbmc.getCondVisibility(
+                "Player.HasMedia"
+            ):
+                return ""
+            if hasattr(xbmc, "getInfoLabel"):
+                return normalize_uri(
+                    str(xbmc.getInfoLabel("Player.Filenameandpath") or "")
+                )
             player = xbmc.Player()
             if not player.isPlaying():
                 return ""

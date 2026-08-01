@@ -17,6 +17,7 @@ VIEW_VALUES = {
     "favorites",
     "rated",
     "geotagged",
+    "smart",
 }
 
 DEFAULT_ROWS = [
@@ -32,16 +33,16 @@ DEFAULT_ROWS = [
 ]
 
 ROUTES = [
-    "recent-taken?widget=1",
-    "recent-added?widget=1",
-    "random?widget=1",
-    "recent-folders?widget=1",
-    "random-folders?widget=1",
-    "on-this-day?widget=1",
-    "on-this-day-random?widget=1",
-    "favorites?widget=1",
-    "rated?widget=1",
-    "geotagged?widget=1",
+    "recent-taken?widget=1&amp;home=1",
+    "recent-added?widget=1&amp;home=1",
+    "random?widget=1&amp;home=1",
+    "recent-folders?widget=1&amp;home=1",
+    "random-folders?widget=1&amp;home=1",
+    "on-this-day?widget=1&amp;home=1",
+    "on-this-day-random?widget=1&amp;home=1",
+    "favorites?widget=1&amp;home=1",
+    "rated?widget=1&amp;home=1",
+    "geotagged?widget=1&amp;home=1",
 ]
 
 HEADINGS = [
@@ -64,7 +65,11 @@ def test_home_screen_settings_offer_nine_ordered_slots() -> None:
     settings = {node.attrib["id"]: node for node in root.findall(".//setting")}
 
     assert settings["show_media_sources"].findtext("default") == "true"
-    assert settings["widget_limit"].findtext("./constraints/maximum") == "50"
+    assert settings["widget_limit"].findtext("default") == "10"
+    assert settings["widget_limit"].findtext("./constraints/minimum") == "4"
+    assert settings["widget_limit"].findtext("./constraints/maximum") == "40"
+    assert settings["home_widget_limit"].findtext("visible") == "false"
+    assert settings["home_widget_limit_migrated_v2"].findtext("visible") == "false"
     configure = settings["configure_home_screen"]
     assert configure.attrib["type"] == "action"
     assert configure.findtext("data") == (
@@ -74,6 +79,8 @@ def test_home_screen_settings_offer_nine_ordered_slots() -> None:
     assert configure.findtext("./control/close") == "true"
     assert settings["home_layout"].findtext("level") == "4"
     assert settings["home_layout"].findtext("visible") == "false"
+    assert settings["home_layout_v2"].findtext("level") == "4"
+    assert settings["home_layout_v2"].findtext("visible") == "false"
     for position, expected_default in enumerate(DEFAULT_ROWS, start=1):
         setting = settings[f"home_row_{position}"]
         assert setting.findtext("default") == expected_default
@@ -81,6 +88,9 @@ def test_home_screen_settings_offer_nine_ordered_slots() -> None:
         assert setting.findtext("visible") == "false"
         values = {option.text for option in setting.findall("./constraints/options/option")}
         assert values == VIEW_VALUES
+        assert settings[f"home_smart_id_{position}"].attrib["type"] == "integer"
+        assert settings[f"home_smart_name_{position}"].attrib["type"] == "string"
+        assert settings[f"home_smart_mode_{position}"].findtext("default") == "poster"
 
 
 def test_general_settings_offer_estuary_album_views() -> None:
@@ -133,5 +143,12 @@ def test_home_fragment_has_visible_titles_and_all_routes() -> None:
         assert f"plugin://plugin.image.mypicsdb3/{route}" in home
     for heading in HEADINGS:
         assert f'value="{heading}"' in home
-    assert home.count('<param name="widget_limit" value="50"/>') == 90
+    assert home.count('<param name="widget_limit" value="40"/>') == 117
+    assert home.count("widget=1&amp;home=1") == 117
+    assert home.count("saved-search?id=$INFO[Addon.SettingInt") == 27
+    assert "Addon.SettingInt(plugin.image.mypicsdb3,home_widget_limit)" not in home
+    assert "&amp;limit=" not in home
+    assert "Window(Home).Property(MyPicsDB3.HomeWidgetGeneration)" in home
+    assert "WidgetListSquareMyPicsDB" in home
+    assert "WidgetListLandscapeMyPicsDB" in home
     assert "$ADDON[plugin.image.mypicsdb3" not in home

@@ -4,7 +4,7 @@ import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-from mypicsdb3.config import from_getter
+from mypicsdb3.config import DEFAULT_PICTURE_EXTENSIONS, from_getter
 
 ROOT = Path(__file__).resolve().parents[1]
 SETTINGS = ROOT / "plugin.image.mypicsdb3" / "resources" / "settings.xml"
@@ -18,20 +18,45 @@ def settings_by_id():
 
 def test_general_numeric_settings_show_labels_and_values():
     settings = settings_by_id()
-    for setting_id, label in (("widget_limit", "32011"), ("browser_page_size", "32012")):
+    for setting_id, label in (("widget_limit", "32782"), ("home_widget_limit", "32782"), ("browser_page_size", "32012")):
         setting = settings[setting_id]
         assert setting.attrib["label"] == label
         control = setting.find("control")
         assert control is not None
-        assert control.attrib == {"type": "spinner", "format": "string"}
-    assert settings["widget_limit"].findtext("./constraints/maximum") == "50"
+        assert control.attrib == {"type": "spinner", "format": "integer"}
+    assert settings["widget_limit"].findtext("default") == "10"
+    assert settings["widget_limit"].findtext("./constraints/minimum") == "4"
+    assert settings["widget_limit"].findtext("./constraints/maximum") == "40"
+    assert settings["home_widget_limit"].findtext("visible") == "false"
+    assert settings["home_widget_limit_migrated_v2"].findtext("visible") == "false"
 
 
-def test_home_widget_limit_clamps_legacy_values_to_50():
-    values = {"widget_limit": "100"}
+def test_home_widget_limit_is_unified_and_clamped():
+    values = {
+        "widget_limit": "100",
+        "home_widget_limit": "4",
+        "home_widget_limit_migrated_v2": "true",
+    }
     settings = from_getter(lambda key: values.get(key, ""), "/tmp/mypicsdb3")
 
-    assert settings.widget_limit == 50
+    assert settings.widget_limit == 40
+    assert settings.home_widget_limit == 40
+
+
+def test_pre_035_widget_value_wins_over_temporary_default_ten():
+    values = {"widget_limit": "39", "home_widget_limit": "10"}
+    settings = from_getter(lambda key: values.get(key, ""), "/tmp/mypicsdb3")
+
+    assert settings.widget_limit == 39
+    assert settings.home_widget_limit == 39
+
+
+def test_035_home_value_is_migrated_when_original_is_still_default():
+    values = {"widget_limit": "15", "home_widget_limit": "27"}
+    settings = from_getter(lambda key: values.get(key, ""), "/tmp/mypicsdb3")
+
+    assert settings.widget_limit == 27
+    assert settings.home_widget_limit == 27
 
 
 def test_home_screen_uses_editor_and_internal_legacy_slots():
@@ -75,6 +100,7 @@ def test_english_catalogue_is_separated_and_has_clear_labels():
     for label in (
         "Default items per home-screen row",
         "Pictures per browser page",
+        "Home-screen pictures per row",
         "Default album view",
         "Configure home-screen rows",
         "Minimum picture rating",
@@ -83,6 +109,29 @@ def test_english_catalogue_is_separated_and_has_clear_labels():
         assert ('msgid "%s"' % label) in text
         assert ('msgstr "%s"' % label) in text
     assert not re.search(r'msgstr "[^"]*"\nmsgctxt "#', text)
+
+
+def test_nef_is_in_the_default_picture_extensions_and_legacy_defaults_upgrade():
+    settings = settings_by_id()
+    expected = "jpg,jpeg,png,gif,bmp,tif,tiff,webp,heic,heif,avif,nef"
+    assert settings["extensions"].findtext("default") == expected
+
+    default_settings = from_getter(lambda _key: "", "/tmp/mypicsdb3")
+    assert default_settings.extensions == DEFAULT_PICTURE_EXTENSIONS
+    assert default_settings.extensions[-1] == "nef"
+
+    legacy = "jpg,jpeg,png,gif,bmp,tif,tiff,webp,heic,heif,avif"
+    upgraded = from_getter(
+        lambda key: legacy if key == "extensions" else "",
+        "/tmp/mypicsdb3",
+    )
+    assert upgraded.extensions == DEFAULT_PICTURE_EXTENSIONS
+
+    custom = from_getter(
+        lambda key: "jpg,png" if key == "extensions" else "",
+        "/tmp/mypicsdb3",
+    )
+    assert custom.extensions == ("jpg", "png")
 
 
 def test_video_scanning_is_opt_in_and_has_separate_extensions():

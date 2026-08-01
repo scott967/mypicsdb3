@@ -37,7 +37,9 @@ def add_picture(
                 "folder_id": folder_id,
                 "uri": str(root / name),
                 "filename": name,
-                "extension": "mp4" if media_type == "video" else "jpg",
+                "extension": Path(name).suffix.lstrip(".").lower() or (
+                    "mp4" if media_type == "video" else "jpg"
+                ),
                 "media_type": media_type,
                 "file_size": 123,
                 "file_mtime": 1000.0,
@@ -80,7 +82,7 @@ def test_catalog_queries_and_favorites(tmp_path: Path) -> None:
     assert catalog.pictures_for_camera("Canon", "EOS R6", 10)[0]["id"] == picture_id
     assert catalog.random_pictures(10)[0]["id"] == picture_id
     assert catalog.random_folders(10)[0]["picture_count"] == 1
-    assert catalog.years() == [{"year": 2020, "picture_count": 1, "uri": str(tmp_path / "photos" / "image.jpg"), "thumb_uri": str(tmp_path / "photos" / "image.jpg")}]
+    assert catalog.years() == [{"year": 2020, "picture_count": 1, "uri": str(tmp_path / "photos" / "image.jpg"), "thumb_uri": str(tmp_path / "photos" / "image.jpg"), "media_type": "picture"}]
     assert catalog.cameras()[0]["picture_count"] == 1
     tags = catalog.tags()
     assert {row["name"] for row in tags} == {"Summer", "Family"}
@@ -116,7 +118,9 @@ def test_album_art_prefers_a_picture_over_a_newer_video(tmp_path: Path) -> None:
     random_album = catalog.random_folders(10)[0]
 
     assert recent["representative_uri"].endswith("cover.jpg")
+    assert recent["representative_media_type"] == "picture"
     assert random_album["representative_uri"].endswith("cover.jpg")
+    assert random_album["representative_media_type"] == "picture"
     with catalog.engine.transaction() as connection:
         summary = catalog.engine.fetchone(
             connection,
@@ -127,6 +131,30 @@ def test_album_art_prefers_a_picture_over_a_newer_video(tmp_path: Path) -> None:
     assert summary["representative_picture_id"] == picture_id
     assert summary["latest_taken_at"] == "2026-06-21 03:15:00"
     assert summary["latest_discovered_at"] == "2026-07-21 09:00:00"
+
+
+def test_album_art_prefers_common_still_format_over_newer_raw(tmp_path: Path) -> None:
+    catalog = make_catalog(tmp_path)
+    root = tmp_path / "raw-album"
+    add_picture(
+        catalog,
+        root,
+        "cover.jpg",
+        taken_at="2024-01-01 12:00:00",
+        discovered_at="2026-07-20 09:00:00",
+    )
+    add_picture(
+        catalog,
+        root,
+        "latest.nef",
+        taken_at="2026-06-21 03:15:00",
+        discovered_at="2026-07-21 09:00:00",
+    )
+
+    album = catalog.recent_folders(10)[0]
+
+    assert album["representative_uri"].endswith("cover.jpg")
+    assert album["representative_extension"] == "jpg"
 
 
 def test_video_only_album_keeps_video_as_fallback_art(tmp_path: Path) -> None:
@@ -143,6 +171,7 @@ def test_video_only_album_keeps_video_as_fallback_art(tmp_path: Path) -> None:
     album = catalog.recent_folders(10)[0]
 
     assert album["representative_uri"].endswith("only.mp4")
+    assert album["representative_media_type"] == "video"
     with catalog.engine.transaction() as connection:
         summary = catalog.engine.fetchone(
             connection,

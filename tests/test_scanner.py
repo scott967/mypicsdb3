@@ -264,6 +264,7 @@ def test_video_scan_skips_picture_metadata_and_stores_media_type(tmp_path: Path)
     }
     video = next(row for row in rows if row["media_type"] == "video")
     assert video["mime_type"] == "video/mp4"
+    assert video["thumb_uri"] is None
     assert video["taken_source"] == "File mtime fallback"
 
 
@@ -367,3 +368,30 @@ def test_listed_existing_file_access_error_does_not_mark_it_missing(
         "inaccessible.jpg"
     ]
     assert catalog.latest_scan()["status"] == "completed_with_errors"
+
+
+def test_slow_smb_operations_are_logged_without_failing_scan(tmp_path, monkeypatch) -> None:
+    root = tmp_path / "photos"
+    root.mkdir()
+    (root / "image.jpg").write_bytes(b"image")
+    catalog, _source, original = setup_scanner(tmp_path, root)
+    messages = []
+    logger = type(
+        "Logger",
+        (),
+        {"warning": lambda self, message, *args: messages.append(message % args)},
+    )()
+    monkeypatch.setattr(scanner_module, "SLOW_IO_WARNING_SECONDS", 0.0)
+    scanner = Scanner(
+        catalog,
+        LocalFilesystem(),
+        original.settings,
+        logger=logger,
+        metadata_reader=fake_metadata,
+    )
+
+    result = scanner.scan_sources()
+
+    assert result.errors == 0
+    assert any(message.startswith("Slow directory listing:") for message in messages)
+    assert any(message.startswith("Slow media inspection:") for message in messages)

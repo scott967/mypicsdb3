@@ -115,6 +115,35 @@ def extension_of(name: str) -> str:
     return name.rsplit(".", 1)[-1].lower()
 
 
+
+def kodi_image_uri(uri: str) -> str:
+    """Return Kodi's canonical cached-image URI for a still picture.
+
+    Supplying one explicit image URI avoids skin-side artwork probing and gives
+    Kodi a stable texture-cache key for SMB, NFS, local and Unicode paths.
+    Existing ``image://`` values are left untouched.
+    """
+
+    value = str(uri or "").strip()
+    if not value or value.startswith("image://"):
+        return value
+    return "image://%s/" % quote(value, safe="")
+
+def kodi_generated_video_thumbnail_uri(uri: str) -> str:
+    """Return Kodi's lazy generated-frame artwork URI for a video file.
+
+    Kodi understands ``image://video@<percent-encoded-media-uri>/`` and
+    generates a cached frame through its native video thumbnail loader. The
+    original media URI is encoded as one URI component so SMB, NFS, local and
+    Unicode paths remain unambiguous.
+    """
+
+    value = str(uri or "").strip()
+    if not value:
+        return ""
+    return "image://video@%s/" % quote(value, safe="")
+
+
 def plugin_url(base_url: str, route: str, **params: Any) -> str:
     route = route.strip("/")
     parts = urlsplit(base_url)
