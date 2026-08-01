@@ -1,0 +1,29 @@
+{
+  "versions": [
+    {
+      "version": "22.0.0~beta1.9",
+      "filename": "skin.estuary.mypicsdb3-22.0.0~beta1.9.zip",
+      "source_ref": "22.0b1-Piers"
+    },
+    {
+      "version": "22.0.0~beta1.4",
+      "filename": "skin.estuary.mypicsdb3-22.0.0~beta1.4.zip",
+      "source_ref": "22.0b1-Piers"
+    },
+    {
+      "version": "22.0.0~alpha3.4",
+      "filename": "skin.estuary.mypicsdb3-22.0.0~alpha3.4.zip",
+      "source_ref": "22.0a3-Piers"
+    },
+    {
+      "version": "22.0.0~alpha2.4",
+      "filename": "skin.estuary.mypicsdb3-22.0.0~alpha2.4.zip",
+      "source_ref": "22.0a2-Piers"
+    },
+    {
+      "version": "22.0.0~alpha1.4",
+      "filename": "skin.estuary.mypicsdb3-22.0.0~alpha1.4.zip",
+      "source_ref": "22.0a1-Piers"
+    }
+  ]
+}
